@@ -21,6 +21,10 @@ class CreateStationRequest(BaseModel):
     shuffle: bool = True
 
 
+class PlayRequest(BaseModel):
+    audio_device: Optional[str] = None  # VLC device id from GET /devices
+
+
 # ------------------------------------------------------------------
 # Station CRUD
 # ------------------------------------------------------------------
@@ -58,13 +62,13 @@ async def delete_station(station_id: str):
 # ------------------------------------------------------------------
 
 @router.post("/{station_id}/play", response_model=Optional[Track])
-async def play(station_id: str):
+async def play(station_id: str, body: PlayRequest = PlayRequest()):
     station = station_manager.get_station(station_id)
     if not station:
         raise HTTPException(status_code=404, detail="Station not found")
     if not station.queue:
         raise HTTPException(status_code=409, detail="Station queue is empty")
-    await playback_service.start(station_id)
+    await playback_service.start(station_id, audio_device=body.audio_device)
     return station.current_track
 
 

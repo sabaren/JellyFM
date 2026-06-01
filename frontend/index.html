@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JellyFM</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f0f13;
+    --surface: #1a1a22;
+    --surface2: #22222e;
+    --border: #2e2e3e;
+    --accent: #7c6af7;
+    --accent2: #a78bfa;
+    --text: #e2e2f0;
+    --muted: #7070a0;
+    --danger: #f87171;
+    --success: #4ade80;
+    --radius: 10px;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  header h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
+  header h1 span { color: var(--accent2); }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); margin-left: auto;
+    transition: background 0.3s;
+  }
+  .status-dot.ok { background: var(--success); }
+  .status-dot.err { background: var(--danger); }
+
+  main {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 24px 16px;
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 20px;
+  }
+  @media (max-width: 700px) { main { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 12px 16px;
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .panel-body { padding: 16px; }
+
+  label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 4px; }
+  input, select {
+    width: 100%; padding: 8px 10px;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-size: 0.875rem;
+    outline: none; transition: border-color 0.2s;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  .field { margin-bottom: 12px; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 7px 14px; border-radius: 6px; font-size: 0.875rem; font-weight: 500;
+    cursor: pointer; border: none; transition: opacity 0.15s, transform 0.1s;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent2); }
+  .btn-ghost {
+    background: var(--surface2); color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent2); }
+  .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  .btn-danger:hover:not(:disabled) { background: var(--danger); color: #fff; }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+
+  /* Station list */
+  .station-item {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 12px; border-radius: 8px; cursor: pointer;
+    border: 1px solid transparent; transition: all 0.15s;
+    margin-bottom: 8px;
+  }
+  .station-item:hover { background: var(--surface2); border-color: var(--border); }
+  .station-item.active { background: var(--surface2); border-color: var(--accent); }
+  .station-name { font-weight: 600; }
+  .station-meta { font-size: 0.78rem; color: var(--muted); }
+  .badge {
+    display: inline-block; padding: 1px 7px; border-radius: 99px;
+    font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .badge-playing { background: #1a3a2a; color: var(--success); }
+  .badge-idle    { background: var(--surface2); color: var(--muted); }
+  .badge-paused  { background: #2a2a1a; color: #facc15; }
+
+  /* Now playing */
+  .now-playing-card {
+    background: var(--surface2); border-radius: 8px; padding: 20px;
+    border: 1px solid var(--border); margin-bottom: 16px;
+  }
+  .track-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 2px; }
+  .track-artist { color: var(--muted); margin-bottom: 4px; }
+  .track-album { font-size: 0.78rem; color: var(--muted); }
+  .track-next {
+    margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
+    font-size: 0.8rem; color: var(--muted);
+  }
+  .track-next strong { color: var(--text); }
+
+  .transport { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; align-items: center; }
+  .device-row { margin-top: 12px; display: flex; gap: 8px; align-items: flex-end; }
+  .device-row select { flex: 1; }
+
+  .empty { color: var(--muted); font-size: 0.875rem; padding: 8px 0; }
+
+  #toast {
+    position: fixed; bottom: 20px; right: 20px;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 16px;
+    font-size: 0.85rem; max-width: 320px;
+    opacity: 0; transform: translateY(8px);
+    transition: opacity 0.2s, transform 0.2s;
+    pointer-events: none; z-index: 9999;
+  }
+  #toast.show { opacity: 1; transform: translateY(0); }
+  #toast.err { border-color: var(--danger); color: var(--danger); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Jelly<span>FM</span></h1>
+  <div id="statusDot" class="status-dot" title="Server status"></div>
+</header>
+
+<main>
+  <!-- Left column: create + station list -->
+  <div>
+    <div class="panel" style="margin-bottom:16px">
+      <div class="panel-header">New Station</div>
+      <div class="panel-body">
+        <div class="field">
+          <label>Station name</label>
+          <input id="newName" placeholder="e.g. Late Night Jazz" />
+        </div>
+        <div class="field">
+          <label>Genre</label>
+          <select id="newGenre"><option value="">— loading —</option></select>
+        </div>
+        <div class="field" style="display:flex;align-items:center;gap:8px;margin-bottom:0">
+          <input type="checkbox" id="newShuffle" checked style="width:auto">
+          <label for="newShuffle" style="margin:0;cursor:pointer">Shuffle</label>
+        </div>
+        <div style="margin-top:14px">
+          <button class="btn btn-primary" id="createBtn" onclick="createStation()">Create Station</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">Stations</div>
+      <div class="panel-body" id="stationList">
+        <p class="empty">No stations yet.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right column: now playing + controls -->
+  <div>
+    <div class="panel">
+      <div class="panel-header">Now Playing</div>
+      <div class="panel-body" id="nowPlayingPanel">
+        <p class="empty">Select a station to begin.</p>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const API = '';  // same origin
+let selectedId = null;
+let genres = [];
+let devices = [];
+let pollTimer = null;
+
+// ── Bootstrap ────────────────────────────────────────────────────────────────
+async function init() {
+  await Promise.all([checkHealth(), loadGenres(), loadDevices()]);
+  await loadStations();
+  startPoll();
+}
+
+async function checkHealth() {
+  try {
+    const r = await fetch(`${API}/health`);
+    document.getElementById('statusDot').className = r.ok ? 'status-dot ok' : 'status-dot err';
+  } catch { document.getElementById('statusDot').className = 'status-dot err'; }
+}
+
+async function loadGenres() {
+  try {
+    const r = await fetch(`${API}/genres`);
+    genres = await r.json();
+    const sel = document.getElementById('newGenre');
+    sel.innerHTML = genres.length
+      ? genres.map(g => `<option value="${esc(g.name)}">${esc(g.name)}${g.track_count ? ` (${g.track_count})` : ''}</option>`).join('')
+      : '<option value="">No genres found</option>';
+  } catch { toast('Could not load genres — is Jellyfin reachable?', true); }
+}
+
+async function loadDevices() {
+  try {
+    const r = await fetch(`${API}/devices`);
+    devices = await r.json();
+  } catch { devices = []; }
+}
+
+// ── Stations ─────────────────────────────────────────────────────────────────
+async function loadStations() {
+  try {
+    const r = await fetch(`${API}/stations`);
+    const stations = await r.json();
+    renderStationList(stations);
+    if (selectedId) {
+      const s = stations.find(s => s.id === selectedId);
+      if (s) await refreshNowPlaying(selectedId);
+    }
+  } catch { toast('Could not load stations', true); }
+}
+
+function renderStationList(stations) {
+  const el = document.getElementById('stationList');
+  if (!stations.length) { el.innerHTML = '<p class="empty">No stations yet.</p>'; return; }
+  el.innerHTML = stations.map(s => `
+    <div class="station-item ${s.id === selectedId ? 'active' : ''}" onclick="selectStation('${s.id}')">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="station-name">${esc(s.name)}</span>
+        <span class="badge badge-${s.status}">${s.status}</span>
+      </div>
+      <span class="station-meta">${esc(s.genre)} · ${s.queue.length} tracks</span>
+    </div>
+  `).join('');
+}
+
+async function createStation() {
+  const name = document.getElementById('newName').value.trim();
+  const genre = document.getElementById('newGenre').value;
+  const shuffle = document.getElementById('newShuffle').checked;
+  if (!name || !genre) { toast('Name and genre required', true); return; }
+  const btn = document.getElementById('createBtn');
+  btn.disabled = true;
+  try {
+    const r = await fetch(`${API}/stations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, genre, shuffle }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail);
+    const station = await r.json();
+    document.getElementById('newName').value = '';
+    toast(`Station "${station.name}" created`);
+    await loadStations();
+    selectStation(station.id);
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; }
+}
+
+async function selectStation(id) {
+  selectedId = id;
+  await loadStations();
+  await refreshNowPlaying(id);
+}
+
+async function deleteStation(id) {
+  if (!confirm('Delete this station?')) return;
+  await fetch(`${API}/stations/${id}`, { method: 'DELETE' });
+  if (selectedId === id) { selectedId = null; document.getElementById('nowPlayingPanel').innerHTML = '<p class="empty">Select a station to begin.</p>'; }
+  await loadStations();
+}
+
+// ── Now Playing ───────────────────────────────────────────────────────────────
+async function refreshNowPlaying(id) {
+  if (!id) return;
+  try {
+    const [npRes, stRes] = await Promise.all([
+      fetch(`${API}/stations/${id}/now-playing`),
+      fetch(`${API}/stations/${id}`),
+    ]);
+    const np = await npRes.json();
+    const station = await stRes.json();
+    renderNowPlaying(id, np, station);
+  } catch { }
+}
+
+function renderNowPlaying(id, np, station) {
+  const panel = document.getElementById('nowPlayingPanel');
+  const deviceOptions = devices.length
+    ? `<option value="">System default</option>` + devices.map(d =>
+        `<option value="${esc(d.id)}">${esc(d.label)}${d.module_label ? ' — ' + esc(d.module_label) : ''}</option>`
+      ).join('')
+    : `<option value="">No devices detected</option>`;
+
+  const currentHtml = np.current ? `
+    <div class="now-playing-card">
+      <div class="track-title">${esc(np.current.name)}</div>
+      <div class="track-artist">${esc(np.current.artist)}</div>
+      ${np.current.album ? `<div class="track-album">${esc(np.current.album)}</div>` : ''}
+      ${np.next ? `<div class="track-next">Up next: <strong>${esc(np.next.name)}</strong> by ${esc(np.next.artist)}</div>` : ''}
+    </div>
+  ` : `<div class="now-playing-card"><p class="empty">Queue is ready. Hit Play.</p></div>`;
+
+  panel.innerHTML = `
+    <div style="margin-bottom:8px;display:flex;align-items:center;gap:8px">
+      <strong>${esc(station.name)}</strong>
+      <span class="badge badge-${station.status}">${station.status}</span>
+      <button class="btn btn-danger" style="margin-left:auto;padding:4px 10px;font-size:0.75rem" onclick="deleteStation('${id}')">Delete</button>
+    </div>
+
+    ${currentHtml}
+
+    <div class="device-row">
+      <div style="flex:1">
+        <label>Audio output device</label>
+        <select id="deviceSelect">${deviceOptions}</select>
+      </div>
+      <button class="btn btn-ghost" onclick="loadDevices().then(()=>refreshNowPlaying('${id}'))" title="Refresh device list">↺</button>
+    </div>
+
+    <div class="transport">
+      <button class="btn btn-primary" onclick="controlStation('${id}','play')">▶ Play</button>
+      <button class="btn btn-ghost" onclick="controlStation('${id}','pause')">⏸ Pause</button>
+      <button class="btn btn-ghost" onclick="controlStation('${id}','skip')">⏭ Skip</button>
+      <button class="btn btn-ghost" onclick="controlStation('${id}','stop')">⏹ Stop</button>
+      <button class="btn btn-ghost" onclick="controlStation('${id}','refill')" title="Re-fetch tracks from Jellyfin">⟳ Refill</button>
+    </div>
+  `;
+}
+
+async function controlStation(id, action) {
+  const device = document.getElementById('deviceSelect')?.value || null;
+  const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
+  if (action === 'play') opts.body = JSON.stringify({ audio_device: device || null });
+
+  try {
+    const r = await fetch(`${API}/stations/${id}/${action}`, opts);
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail); }
+    await loadStations();
+    await refreshNowPlaying(id);
+  } catch (e) { toast(e.message, true); }
+}
+
+// ── Polling ───────────────────────────────────────────────────────────────────
+function startPoll() {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    await loadStations();
+    if (selectedId) await refreshNowPlaying(selectedId);
+  }, 4000);
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+let toastTimer;
+function toast(msg, err = false) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show' + (err ? ' err' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = ''; }, 3500);
+}
+
+init();
+</script>
+</body>
+</html>

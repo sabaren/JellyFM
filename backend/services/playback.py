@@ -35,8 +35,9 @@ _POST_TTS_PAUSE = 0.4
 class _StationPlayer:
     """Internal per-station state held by PlaybackService."""
 
-    def __init__(self, station_id: str):
+    def __init__(self, station_id: str, audio_device: Optional[str] = None):
         self.station_id = station_id
+        self.audio_device = audio_device  # VLC aout device string, e.g. "hw:0,0"
         self.skip_event = asyncio.Event()
         self.stop_event = asyncio.Event()
         self.paused = False
@@ -49,6 +50,8 @@ class _StationPlayer:
             self._media_player.stop()
             self._media_player.release()
         self._media_player = self._vlc_instance.media_player_new()
+        if self.audio_device:
+            self._media_player.audio_output_device_set(None, self.audio_device)
         return self._media_player
 
     def stop_audio(self) -> None:
@@ -72,10 +75,52 @@ class PlaybackService:
         self._players: dict[str, _StationPlayer] = {}
 
     # ------------------------------------------------------------------
+    # Device enumeration
+    # ------------------------------------------------------------------
+
+    def list_audio_devices(self) -> list[dict]:
+        """Return all audio output devices VLC can see on this host."""
+        instance = vlc.Instance("--no-video", "--quiet")
+        player = instance.media_player_new()
+        devices = []
+        try:
+            mods = player.audio_output_enumerate_devices()
+            if mods:
+                for mod in mods:
+                    # Each mod is a dict-like object: {name, description, devices:[{device,description}]}
+                    module_name = mod.get("name", "") if isinstance(mod, dict) else getattr(mod, "name", "")
+                    module_desc = mod.get("description", "") if isinstance(mod, dict) else getattr(mod, "description", "")
+                    devs = mod.get("devices", []) if isinstance(mod, dict) else getattr(mod, "devices", [])
+                    if devs:
+                        for d in devs:
+                            dev_id = d.get("device", "") if isinstance(d, dict) else getattr(d, "device", "")
+                            dev_desc = d.get("description", "") if isinstance(d, dict) else getattr(d, "description", "")
+                            devices.append({
+                                "id": dev_id,
+                                "label": dev_desc or dev_id,
+                                "module": module_name,
+                                "module_label": module_desc,
+                            })
+                    else:
+                        # Module with no sub-devices — expose the module itself
+                        devices.append({
+                            "id": module_name,
+                            "label": module_desc or module_name,
+                            "module": module_name,
+                            "module_label": module_desc,
+                        })
+        except Exception:
+            logger.exception("Failed to enumerate audio devices")
+        finally:
+            player.release()
+            instance.release()
+        return devices
+
+    # ------------------------------------------------------------------
     # Public controls
     # ------------------------------------------------------------------
 
-    async def start(self, station_id: str) -> None:
+    async def start(self, station_id: str, audio_device: Optional[str] = None) -> None:
         """Start the playback loop for a station."""
         if station_id in self._players:
             # Already running — just unpause if paused
@@ -85,7 +130,7 @@ class PlaybackService:
                 player.pause_audio()
             return
 
-        player = _StationPlayer(station_id)
+        player = _StationPlayer(station_id, audio_device=audio_device)
         self._players[station_id] = player
         player.task = asyncio.create_task(
             self._playback_loop(player),
