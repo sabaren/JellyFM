@@ -137,9 +137,6 @@
   .track-next strong { color: var(--text); }
 
   .transport { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; align-items: center; }
-  .device-row { margin-top: 12px; display: flex; gap: 8px; align-items: flex-end; }
-  .device-row select { flex: 1; }
-
   .empty { color: var(--muted); font-size: 0.875rem; padding: 8px 0; }
 
   #toast {
@@ -211,12 +208,11 @@
 const API = '';  // same origin
 let selectedId = null;
 let genres = [];
-let devices = [];
 let pollTimer = null;
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 async function init() {
-  await Promise.all([checkHealth(), loadGenres(), loadDevices()]);
+  await Promise.all([checkHealth(), loadGenres()]);
   await loadStations();
   startPoll();
 }
@@ -237,13 +233,6 @@ async function loadGenres() {
       ? genres.map(g => `<option value="${esc(g.name)}">${esc(g.name)}${g.track_count ? ` (${g.track_count})` : ''}</option>`).join('')
       : '<option value="">No genres found</option>';
   } catch { toast('Could not load genres — is Jellyfin reachable?', true); }
-}
-
-async function loadDevices() {
-  try {
-    const r = await fetch(`${API}/devices`);
-    devices = await r.json();
-  } catch { devices = []; }
 }
 
 // ── Stations ─────────────────────────────────────────────────────────────────
@@ -325,11 +314,6 @@ async function refreshNowPlaying(id) {
 
 function renderNowPlaying(id, np, station) {
   const panel = document.getElementById('nowPlayingPanel');
-  const deviceOptions = devices.length
-    ? `<option value="">System default</option>` + devices.map(d =>
-        `<option value="${esc(d.id)}">${esc(d.label)}${d.module_label ? ' — ' + esc(d.module_label) : ''}</option>`
-      ).join('')
-    : `<option value="">No devices detected</option>`;
 
   const currentHtml = np.current ? `
     <div class="now-playing-card">
@@ -349,14 +333,6 @@ function renderNowPlaying(id, np, station) {
 
     ${currentHtml}
 
-    <div class="device-row">
-      <div style="flex:1">
-        <label>Audio output device</label>
-        <select id="deviceSelect">${deviceOptions}</select>
-      </div>
-      <button class="btn btn-ghost" onclick="loadDevices().then(()=>refreshNowPlaying('${id}'))" title="Refresh device list">↺</button>
-    </div>
-
     <div class="transport">
       <button class="btn btn-primary" onclick="controlStation('${id}','play')">▶ Play</button>
       <button class="btn btn-ghost" onclick="controlStation('${id}','pause')">⏸ Pause</button>
@@ -368,9 +344,8 @@ function renderNowPlaying(id, np, station) {
 }
 
 async function controlStation(id, action) {
-  const device = document.getElementById('deviceSelect')?.value || null;
   const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
-  if (action === 'play') opts.body = JSON.stringify({ audio_device: device || null });
+  if (action === 'play') opts.body = JSON.stringify({ audio_device: null });
 
   try {
     const r = await fetch(`${API}/stations/${id}/${action}`, opts);
