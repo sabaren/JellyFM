@@ -53,7 +53,7 @@
     margin: 0 auto;
     padding: 24px 16px;
     display: grid;
-    grid-template-columns: 320px 1fr;
+    grid-template-columns: 300px 1fr;
     gap: 20px;
   }
   @media (max-width: 700px) { main { grid-template-columns: 1fr; } }
@@ -101,9 +101,7 @@
   .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent2); }
   .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
   .btn-danger:hover:not(:disabled) { background: var(--danger); color: #fff; }
-  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 
-  /* Station list */
   .station-item {
     display: flex; flex-direction: column; gap: 6px;
     padding: 12px; border-radius: 8px; cursor: pointer;
@@ -114,21 +112,23 @@
   .station-item.active { background: var(--surface2); border-color: var(--accent); }
   .station-name { font-weight: 600; }
   .station-meta { font-size: 0.78rem; color: var(--muted); }
+
   .badge {
     display: inline-block; padding: 1px 7px; border-radius: 99px;
     font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
   }
   .badge-playing { background: #1a3a2a; color: var(--success); }
-  .badge-idle    { background: var(--surface2); color: var(--muted); }
+  .badge-idle    { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
   .badge-paused  { background: #2a2a1a; color: #facc15; }
 
   /* Now playing */
   .now-playing-card {
     background: var(--surface2); border-radius: 8px; padding: 20px;
     border: 1px solid var(--border); margin-bottom: 16px;
+    min-height: 100px; display: flex; flex-direction: column; justify-content: center;
   }
   .track-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 2px; }
-  .track-artist { color: var(--muted); margin-bottom: 4px; }
+  .track-artist { color: var(--muted); margin-bottom: 2px; }
   .track-album { font-size: 0.78rem; color: var(--muted); }
   .track-next {
     margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
@@ -136,8 +136,33 @@
   }
   .track-next strong { color: var(--text); }
 
-  .transport { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; align-items: center; }
-  .empty { color: var(--muted); font-size: 0.875rem; padding: 8px 0; }
+  /* Progress bar */
+  .progress-wrap {
+    margin: 14px 0 4px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  progress {
+    flex: 1; height: 4px; border-radius: 2px;
+    appearance: none; background: var(--border);
+  }
+  progress::-webkit-progress-bar { background: var(--border); border-radius: 2px; }
+  progress::-webkit-progress-value { background: var(--accent); border-radius: 2px; transition: width 0.5s linear; }
+  progress::-moz-progress-bar { background: var(--accent); border-radius: 2px; }
+  .time { font-size: 0.75rem; color: var(--muted); min-width: 36px; text-align: right; }
+
+  /* Volume */
+  .volume-row {
+    display: flex; align-items: center; gap: 10px; margin-top: 12px;
+    font-size: 0.8rem; color: var(--muted);
+  }
+  input[type=range] {
+    width: 100px; accent-color: var(--accent); cursor: pointer;
+    padding: 0; background: none; border: none;
+  }
+
+  .transport { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; align-items: center; }
+
+  .empty { color: var(--muted); font-size: 0.875rem; }
 
   #toast {
     position: fixed; bottom: 20px; right: 20px;
@@ -150,6 +175,10 @@
   }
   #toast.show { opacity: 1; transform: translateY(0); }
   #toast.err { border-color: var(--danger); color: var(--danger); }
+
+  /* Spinning animation for playing state */
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  .badge-playing { animation: pulse 2s ease-in-out infinite; }
 </style>
 </head>
 <body>
@@ -159,8 +188,11 @@
   <div id="statusDot" class="status-dot" title="Server status"></div>
 </header>
 
+<!-- Hidden audio element — the actual player -->
+<audio id="player" preload="auto"></audio>
+
 <main>
-  <!-- Left column: create + station list -->
+  <!-- Left: create + list -->
   <div>
     <div class="panel" style="margin-bottom:16px">
       <div class="panel-header">New Station</div>
@@ -191,12 +223,12 @@
     </div>
   </div>
 
-  <!-- Right column: now playing + controls -->
+  <!-- Right: now playing -->
   <div>
     <div class="panel">
       <div class="panel-header">Now Playing</div>
       <div class="panel-body" id="nowPlayingPanel">
-        <p class="empty">Select a station to begin.</p>
+        <p class="empty">Create a station and hit Play.</p>
       </div>
     </div>
   </div>
@@ -205,23 +237,38 @@
 <div id="toast"></div>
 
 <script>
-const API = '';  // same origin
+const API = '';
+const audio = document.getElementById('player');
+
 let selectedId = null;
 let genres = [];
-let pollTimer = null;
+let isPlaying = false;
+let progressTimer = null;
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 async function init() {
   await Promise.all([checkHealth(), loadGenres()]);
   await loadStations();
-  startPoll();
+
+  // When a track finishes naturally, skip to next
+  audio.addEventListener('ended', () => advanceTrack());
+  audio.addEventListener('error', (e) => {
+    console.error('Audio error', e);
+    toast('Playback error — skipping', true);
+    advanceTrack();
+  });
+
+  // Keep progress bar ticking
+  audio.addEventListener('timeupdate', updateProgress);
 }
 
 async function checkHealth() {
   try {
     const r = await fetch(`${API}/health`);
     document.getElementById('statusDot').className = r.ok ? 'status-dot ok' : 'status-dot err';
-  } catch { document.getElementById('statusDot').className = 'status-dot err'; }
+  } catch {
+    document.getElementById('statusDot').className = 'status-dot err';
+  }
 }
 
 async function loadGenres() {
@@ -232,7 +279,7 @@ async function loadGenres() {
     sel.innerHTML = genres.length
       ? genres.map(g => `<option value="${esc(g.name)}">${esc(g.name)}${g.track_count ? ` (${g.track_count})` : ''}</option>`).join('')
       : '<option value="">No genres found</option>';
-  } catch { toast('Could not load genres — is Jellyfin reachable?', true); }
+  } catch { toast('Could not reach server', true); }
 }
 
 // ── Stations ─────────────────────────────────────────────────────────────────
@@ -241,25 +288,23 @@ async function loadStations() {
     const r = await fetch(`${API}/stations`);
     const stations = await r.json();
     renderStationList(stations);
-    if (selectedId) {
-      const s = stations.find(s => s.id === selectedId);
-      if (s) await refreshNowPlaying(selectedId);
-    }
-  } catch { toast('Could not load stations', true); }
+  } catch {}
 }
 
 function renderStationList(stations) {
   const el = document.getElementById('stationList');
   if (!stations.length) { el.innerHTML = '<p class="empty">No stations yet.</p>'; return; }
-  el.innerHTML = stations.map(s => `
-    <div class="station-item ${s.id === selectedId ? 'active' : ''}" onclick="selectStation('${s.id}')">
-      <div style="display:flex;align-items:center;gap:8px">
-        <span class="station-name">${esc(s.name)}</span>
-        <span class="badge badge-${s.status}">${s.status}</span>
-      </div>
-      <span class="station-meta">${esc(s.genre)} · ${s.queue.length} tracks</span>
-    </div>
-  `).join('');
+  el.innerHTML = stations.map(s => {
+    const status = (selectedId === s.id) ? (isPlaying ? 'playing' : 'paused') : 'idle';
+    return `
+      <div class="station-item ${s.id === selectedId ? 'active' : ''}" onclick="selectStation('${s.id}')">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="station-name">${esc(s.name)}</span>
+          <span class="badge badge-${status}">${status}</span>
+        </div>
+        <span class="station-meta">${esc(s.genre)} · ${s.queue.length} tracks</span>
+      </div>`;
+  }).join('');
 }
 
 async function createStation() {
@@ -280,91 +325,212 @@ async function createStation() {
     document.getElementById('newName').value = '';
     toast(`Station "${station.name}" created`);
     await loadStations();
-    selectStation(station.id);
+    await selectStation(station.id);
   } catch (e) { toast(e.message, true); }
   finally { btn.disabled = false; }
 }
 
 async function selectStation(id) {
+  // Stop current playback if switching stations
+  if (selectedId && selectedId !== id) {
+    audio.pause();
+    audio.src = '';
+    isPlaying = false;
+  }
   selectedId = id;
   await loadStations();
-  await refreshNowPlaying(id);
+  await renderNowPlaying();
 }
 
 async function deleteStation(id) {
   if (!confirm('Delete this station?')) return;
+  if (selectedId === id) {
+    audio.pause();
+    audio.src = '';
+    isPlaying = false;
+    selectedId = null;
+    document.getElementById('nowPlayingPanel').innerHTML = '<p class="empty">Create a station and hit Play.</p>';
+  }
   await fetch(`${API}/stations/${id}`, { method: 'DELETE' });
-  if (selectedId === id) { selectedId = null; document.getElementById('nowPlayingPanel').innerHTML = '<p class="empty">Select a station to begin.</p>'; }
   await loadStations();
 }
 
-// ── Now Playing ───────────────────────────────────────────────────────────────
-async function refreshNowPlaying(id) {
-  if (!id) return;
+// ── Playback ─────────────────────────────────────────────────────────────────
+async function play() {
+  if (!selectedId) return;
+  const np = await fetchNowPlaying();
+  if (!np?.current) { toast('Queue is empty — try Refill', true); return; }
+
+  announce(np.current, np.next);
+
+  // Small gap after TTS before audio starts
+  await sleep(announcementDuration(np.current, np.next) + 400);
+
+  audio.src = `${API}/stations/${selectedId}/stream`;
+  audio.load();
   try {
-    const [npRes, stRes] = await Promise.all([
-      fetch(`${API}/stations/${id}/now-playing`),
-      fetch(`${API}/stations/${id}`),
-    ]);
-    const np = await npRes.json();
-    const station = await stRes.json();
-    renderNowPlaying(id, np, station);
-  } catch { }
+    await audio.play();
+    isPlaying = true;
+    await loadStations();
+    await renderNowPlaying();
+  } catch (e) {
+    toast('Browser blocked autoplay — click Play again', true);
+  }
 }
 
-function renderNowPlaying(id, np, station) {
+function pause() {
+  if (audio.paused) {
+    audio.play();
+    isPlaying = true;
+  } else {
+    audio.pause();
+    isPlaying = false;
+  }
+  loadStations();
+  renderNowPlaying();
+}
+
+async function advanceTrack() {
+  if (!selectedId) return;
+  await fetch(`${API}/stations/${selectedId}/skip`, { method: 'POST' });
+  await play();
+}
+
+async function skipTrack() {
+  audio.pause();
+  audio.src = '';
+  isPlaying = false;
+  await advanceTrack();
+}
+
+async function previousTrack() {
+  audio.pause();
+  audio.src = '';
+  isPlaying = false;
+  await fetch(`${API}/stations/${selectedId}/previous`, { method: 'POST' });
+  await play();
+}
+
+async function refill() {
+  audio.pause();
+  audio.src = '';
+  isPlaying = false;
+  await fetch(`${API}/stations/${selectedId}/refill`, { method: 'POST' });
+  toast('Queue refilled');
+  await renderNowPlaying();
+}
+
+// ── TTS via Web Speech API ────────────────────────────────────────────────────
+const BANTER = {
+  rock:       ["Buckle up — serious riff energy.", "Nothing fixes a bad day like a power chord.", "Turn it up. Your neighbours have headphones."],
+  jazz:       ["Close your eyes. You're in a smoky club. It's 1957.", "Jazz: musicians having more fun than you.", "This one swings hard."],
+  classical:  ["No words needed. Just listen.", "Centuries old and still hits different.", "Clear your mind. Full attention."],
+  pop:        ["You'll be humming this all week.", "Infectious hooks incoming.", "Straight to the chorus. No patience required."],
+  'hip-hop':  ["Bars. Straight bars.", "This beat alone is worth it.", "Lyricism and rhythm in perfect balance."],
+  electronic: ["Four on the floor. Let's go.", "Your brain on synthesisers.", "Built in a laptop and it still slaps."],
+  metal:      ["Volume up. Way up.", "This is foreground music.", "The guitars are angry. That's a feature."],
+};
+const GENERIC = ["Here's one that deserves your full attention.", "A track that holds up every time.", "Sit back. Let it play.", "Coming up — no skipping allowed."];
+
+function getBanter(genre) {
+  const pool = genre ? (BANTER[genre.toLowerCase()] || GENERIC) : GENERIC;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function announce(current, next) {
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const banter = getBanter(current.genre);
+  let text = `${banter}  Coming up: ${current.name} by ${current.artist}.`;
+  if (next) text += `  And after that: ${next.name} by ${next.artist}.`;
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.rate = 1.05;
+  utt.volume = 0.9;
+  window.speechSynthesis.speak(utt);
+}
+
+function announcementDuration(current, next) {
+  // Rough estimate: ~130 words/min at rate 1.05 → ~2.3 chars/100ms
+  const banter = getBanter(current.genre);
+  let text = `${banter} Coming up: ${current.name} by ${current.artist}.`;
+  if (next) text += ` And after that: ${next.name} by ${next.artist}.`;
+  return (text.length / 2.3) * 100;  // ms
+}
+
+// ── Now Playing UI ────────────────────────────────────────────────────────────
+async function fetchNowPlaying() {
+  if (!selectedId) return null;
+  try {
+    const r = await fetch(`${API}/stations/${selectedId}/now-playing`);
+    return await r.json();
+  } catch { return null; }
+}
+
+async function renderNowPlaying() {
+  if (!selectedId) return;
+  const [np, stRes] = await Promise.all([
+    fetchNowPlaying(),
+    fetch(`${API}/stations/${selectedId}`),
+  ]);
+  const station = await stRes.json();
   const panel = document.getElementById('nowPlayingPanel');
 
-  const currentHtml = np.current ? `
+  const playPauseLabel = isPlaying ? '⏸ Pause' : '▶ Play';
+  const playPauseAction = isPlaying ? 'pause()' : 'play()';
+
+  const trackHtml = np?.current ? `
     <div class="now-playing-card">
       <div class="track-title">${esc(np.current.name)}</div>
       <div class="track-artist">${esc(np.current.artist)}</div>
       ${np.current.album ? `<div class="track-album">${esc(np.current.album)}</div>` : ''}
+      <div class="progress-wrap">
+        <progress id="prog" value="0" max="100"></progress>
+        <span class="time" id="timeEl">0:00</span>
+      </div>
       ${np.next ? `<div class="track-next">Up next: <strong>${esc(np.next.name)}</strong> by ${esc(np.next.artist)}</div>` : ''}
     </div>
-  ` : `<div class="now-playing-card"><p class="empty">Queue is ready. Hit Play.</p></div>`;
+  ` : `<div class="now-playing-card"><p class="empty">Hit Play to start.</p></div>`;
 
   panel.innerHTML = `
-    <div style="margin-bottom:8px;display:flex;align-items:center;gap:8px">
+    <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px">
       <strong>${esc(station.name)}</strong>
-      <span class="badge badge-${station.status}">${station.status}</span>
-      <button class="btn btn-danger" style="margin-left:auto;padding:4px 10px;font-size:0.75rem" onclick="deleteStation('${id}')">Delete</button>
+      <span class="station-meta">${esc(station.genre)}</span>
+      <button class="btn btn-danger" style="margin-left:auto;padding:4px 10px;font-size:0.75rem" onclick="deleteStation('${selectedId}')">Delete</button>
     </div>
 
-    ${currentHtml}
+    ${trackHtml}
+
+    <div class="volume-row">
+      🔊 <input type="range" min="0" max="1" step="0.05" value="${audio.volume}"
+           oninput="audio.volume=this.value" title="Volume">
+    </div>
 
     <div class="transport">
-      <button class="btn btn-primary" onclick="controlStation('${id}','play')">▶ Play</button>
-      <button class="btn btn-ghost" onclick="controlStation('${id}','pause')">⏸ Pause</button>
-      <button class="btn btn-ghost" onclick="controlStation('${id}','skip')">⏭ Skip</button>
-      <button class="btn btn-ghost" onclick="controlStation('${id}','stop')">⏹ Stop</button>
-      <button class="btn btn-ghost" onclick="controlStation('${id}','refill')" title="Re-fetch tracks from Jellyfin">⟳ Refill</button>
+      <button class="btn btn-ghost" onclick="previousTrack()">⏮</button>
+      <button class="btn btn-primary" onclick="${playPauseAction}">${playPauseLabel}</button>
+      <button class="btn btn-ghost" onclick="skipTrack()">⏭ Skip</button>
+      <button class="btn btn-ghost" onclick="refill()" title="Re-fetch tracks from Jellyfin">⟳ Refill</button>
     </div>
   `;
 }
 
-async function controlStation(id, action) {
-  const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
-  if (action === 'play') opts.body = JSON.stringify({ audio_device: null });
-
-  try {
-    const r = await fetch(`${API}/stations/${id}/${action}`, opts);
-    if (!r.ok) { const e = await r.json(); throw new Error(e.detail); }
-    await loadStations();
-    await refreshNowPlaying(id);
-  } catch (e) { toast(e.message, true); }
+function updateProgress() {
+  const prog = document.getElementById('prog');
+  const timeEl = document.getElementById('timeEl');
+  if (!prog || !audio.duration) return;
+  prog.value = (audio.currentTime / audio.duration) * 100;
+  timeEl.textContent = fmt(audio.currentTime);
 }
 
-// ── Polling ───────────────────────────────────────────────────────────────────
-function startPoll() {
-  clearInterval(pollTimer);
-  pollTimer = setInterval(async () => {
-    await loadStations();
-    if (selectedId) await refreshNowPlaying(selectedId);
-  }, 4000);
+function fmt(s) {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60).toString().padStart(2, '0');
+  return `${m}:${sec}`;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }

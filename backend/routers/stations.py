@@ -1,11 +1,12 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
+import httpx
 
 from ..models.station import Station
 from ..models.jellyfin import Track
 from ..services.station_manager import station_manager
-from ..services.playback import playback_service
 from ..services.jellyfin import jellyfin
 
 router = APIRouter(prefix="/stations", tags=["stations"])
@@ -19,10 +20,6 @@ class CreateStationRequest(BaseModel):
     name: str
     genre: str
     shuffle: bool = True
-
-
-class PlayRequest(BaseModel):
-    audio_device: Optional[str] = None  # VLC device id from GET /devices
 
 
 # ------------------------------------------------------------------
@@ -51,56 +48,68 @@ def get_station(station_id: str):
 
 
 @router.delete("/{station_id}", status_code=204)
-async def delete_station(station_id: str):
-    await playback_service.stop(station_id)
+def delete_station(station_id: str):
     if not station_manager.delete_station(station_id):
         raise HTTPException(status_code=404, detail="Station not found")
 
 
 # ------------------------------------------------------------------
-# Playback controls
+# Audio stream proxy
+# Keeps the Jellyfin API key server-side; browser just hits this endpoint.
+# Forwards Range headers so the browser can handle the stream correctly.
 # ------------------------------------------------------------------
 
-@router.post("/{station_id}/play", response_model=Optional[Track])
-async def play(station_id: str, body: PlayRequest = PlayRequest()):
+@router.get("/{station_id}/stream")
+async def stream_audio(station_id: str, request: Request):
     station = station_manager.get_station(station_id)
     if not station:
         raise HTTPException(status_code=404, detail="Station not found")
-    if not station.queue:
-        raise HTTPException(status_code=409, detail="Station queue is empty")
-    await playback_service.start(station_id, audio_device=body.audio_device)
-    return station.current_track
+    track = station.current_track
+    if not track:
+        raise HTTPException(status_code=404, detail="No current track")
+
+    upstream_url = jellyfin.stream_url(track.id)
+    upstream_headers = {}
+    if "range" in request.headers:
+        upstream_headers["Range"] = request.headers["range"]
+
+    async def generate():
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("GET", upstream_url, headers=upstream_headers) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.aiter_bytes(chunk_size=16384):
+                    yield chunk
+
+    return StreamingResponse(
+        generate(),
+        media_type="audio/mpeg",
+        headers={"Accept-Ranges": "bytes"},
+    )
 
 
-@router.post("/{station_id}/pause", status_code=204)
-def pause(station_id: str):
-    if not station_manager.get_station(station_id):
-        raise HTTPException(status_code=404, detail="Station not found")
-    playback_service.pause(station_id)
-
+# ------------------------------------------------------------------
+# Playback queue controls (state only — browser drives actual audio)
+# ------------------------------------------------------------------
 
 @router.post("/{station_id}/skip", response_model=Optional[Track])
 def skip(station_id: str):
     station = station_manager.get_station(station_id)
     if not station:
         raise HTTPException(status_code=404, detail="Station not found")
-    # Signal the playback loop — it will advance the queue internally
-    playback_service.skip(station_id)
-    # Return what *will* be current after the loop advances (next track now)
-    return station.next_track
+    return station.advance()
 
 
-@router.post("/{station_id}/stop", status_code=204)
-async def stop(station_id: str):
-    if not station_manager.get_station(station_id):
+@router.post("/{station_id}/previous", response_model=Optional[Track])
+def previous(station_id: str):
+    station = station_manager.get_station(station_id)
+    if not station:
         raise HTTPException(status_code=404, detail="Station not found")
-    await playback_service.stop(station_id)
+    return station.rewind()
 
 
 @router.post("/{station_id}/refill", response_model=Station)
 async def refill_queue(station_id: str):
     try:
-        await playback_service.stop(station_id)
         return await station_manager.refill_queue(station_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Station not found")
@@ -115,8 +124,6 @@ async def refill_queue(station_id: str):
 class NowPlaying(BaseModel):
     current: Optional[Track]
     next: Optional[Track]
-    stream_url: Optional[str] = None
-    is_playing: bool = False
 
 
 @router.get("/{station_id}/now-playing", response_model=NowPlaying)
@@ -124,10 +131,4 @@ def now_playing(station_id: str):
     station = station_manager.get_station(station_id)
     if not station:
         raise HTTPException(status_code=404, detail="Station not found")
-    current = station.current_track
-    return NowPlaying(
-        current=current,
-        next=station.next_track,
-        stream_url=jellyfin.stream_url(current.id) if current else None,
-        is_playing=playback_service.is_playing(station_id),
-    )
+    return NowPlaying(current=station.current_track, next=station.next_track)
