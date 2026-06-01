@@ -11,6 +11,9 @@ build/
 # Environment
 .env
 
+# Runtime data
+stations.json
+
 # Editor
 .vscode/
 .idea/
