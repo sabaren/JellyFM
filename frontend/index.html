@@ -437,12 +437,14 @@ async function refill() {
 let voices = [];
 
 function loadVoices() {
-  voices = window.speechSynthesis?.getVoices() ?? [];
-  if (!voices.length) return;
+  const all = window.speechSynthesis?.getVoices() ?? [];
+  // Keep only English voices — non-English voices mispronounce romanized Japanese
+  voices = all.filter(v => v.lang.startsWith('en'));
+  if (!voices.length) voices = all;  // fall back to all if no English found
   const sel = document.getElementById('voiceSelect');
   const saved = localStorage.getItem('jellyfm-voice');
   sel.innerHTML = voices.map((v, i) =>
-    `<option value="${i}" ${saved == i ? 'selected' : ''}>${v.name} (${v.lang})</option>`
+    `<option value="${i}" ${saved === String(i) ? 'selected' : ''}>${v.name}</option>`
   ).join('');
 }
 

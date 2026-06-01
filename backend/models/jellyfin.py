@@ -15,6 +15,9 @@ class Track(BaseModel):
     album: Optional[str] = None
     genre: Optional[str] = None
     duration_ticks: Optional[int] = None  # Jellyfin stores duration in 10^-7 s ticks
+    # Romanized versions used by TTS — same as name/artist when no CJK present
+    tts_name: Optional[str] = None
+    tts_artist: Optional[str] = None
 
     @property
     def duration_seconds(self) -> Optional[float]:

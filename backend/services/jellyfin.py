@@ -4,6 +4,7 @@ from typing import Optional
 
 from ..config import settings
 from ..models.jellyfin import Genre, Track
+from .romanize import romanize
 
 # Jellyfin uses this header to identify the client
 _AUTH_HEADER_TEMPLATE = (
@@ -96,17 +97,21 @@ class JellyfinClient:
             )
             resp.raise_for_status()
             items = resp.json().get("Items", [])
-            return [
-                Track(
+            tracks = []
+            for item in items:
+                name = item["Name"]
+                artist = item.get("AlbumArtist") or (item.get("Artists") or ["Unknown"])[0]
+                tracks.append(Track(
                     id=item["Id"],
-                    name=item["Name"],
-                    artist=item.get("AlbumArtist") or (item.get("Artists") or ["Unknown"])[0],
+                    name=name,
+                    artist=artist,
                     album=item.get("Album"),
                     genre=genre_name,
                     duration_ticks=item.get("RunTimeTicks"),
-                )
-                for item in items
-            ]
+                    tts_name=romanize(name),
+                    tts_artist=romanize(artist),
+                ))
+            return tracks
 
     def stream_url(self, track_id: str) -> str:
         return f"{self._base}/Audio/{track_id}/stream?static=true&api_key={self._token}"
