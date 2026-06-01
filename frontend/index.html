@@ -494,8 +494,14 @@ function announce(current, next) {
   if (!window.speechSynthesis) return;
   window.speechSynthesis.cancel();
   const banter = getBanter(current.genre);
-  let text = `${banter}  Coming up: ${current.name} by ${current.artist}.`;
-  if (next) text += `  And after that: ${next.name} by ${next.artist}.`;
+  const name   = current.tts_name   || current.name;
+  const artist = current.tts_artist || current.artist;
+  let text = `${banter}  Coming up: ${name} by ${artist}.`;
+  if (next) {
+    const nName   = next.tts_name   || next.name;
+    const nArtist = next.tts_artist || next.artist;
+    text += `  And after that: ${nName} by ${nArtist}.`;
+  }
   const utt = new SpeechSynthesisUtterance(text);
   utt.voice = getSelectedVoice();
   utt.rate = 1.05;
@@ -504,11 +510,12 @@ function announce(current, next) {
 }
 
 function announcementDuration(current, next) {
-  // Rough estimate: ~130 words/min at rate 1.05 → ~2.3 chars/100ms
   const banter = getBanter(current.genre);
-  let text = `${banter} Coming up: ${current.name} by ${current.artist}.`;
-  if (next) text += ` And after that: ${next.name} by ${next.artist}.`;
-  return (text.length / 2.3) * 100;  // ms
+  const name   = current.tts_name   || current.name;
+  const artist = current.tts_artist || current.artist;
+  let text = `${banter} Coming up: ${name} by ${artist}.`;
+  if (next) text += ` And after that: ${next.tts_name || next.name} by ${next.tts_artist || next.artist}.`;
+  return (text.length / 2.3) * 100;
 }
 
 // ── Now Playing UI ────────────────────────────────────────────────────────────
