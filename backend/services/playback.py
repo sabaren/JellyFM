@@ -41,7 +41,9 @@ class _StationPlayer:
         self.skip_event = asyncio.Event()
         self.stop_event = asyncio.Event()
         self.paused = False
-        self._vlc_instance: vlc.Instance = vlc.Instance("--no-video", "--quiet")
+        # --no-video: headless; --aout=pulse tries PulseAudio first, falls back
+        # to ALSA/OSS/etc. — same path a browser uses for system audio
+        self._vlc_instance: vlc.Instance = vlc.Instance("--no-video", "--quiet", "--aout=pulse")
         self._media_player: Optional[vlc.MediaPlayer] = None
         self.task: Optional[asyncio.Task] = None
 
