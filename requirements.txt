@@ -6,3 +6,4 @@ pydantic-settings==2.2.1
 pyttsx3==2.90
 python-vlc==3.0.21203
 python-dotenv==1.0.1
+pykakasi==2.2.1
