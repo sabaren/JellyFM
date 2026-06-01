@@ -1,15 +1,48 @@
-"""In-memory station registry. Replace with a DB-backed store later if needed."""
+"""In-memory station registry with JSON file persistence."""
+import json
+import logging
 import random
+from pathlib import Path
 from typing import Optional
 
 from ..models.station import Station, StationStatus
 from ..models.jellyfin import Track
 from .jellyfin import jellyfin
 
+logger = logging.getLogger(__name__)
+
+_SAVE_FILE = Path("stations.json")
+
 
 class StationManager:
     def __init__(self):
         self._stations: dict[str, Station] = {}
+        self._load()
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def _save(self) -> None:
+        try:
+            data = [s.model_dump() for s in self._stations.values()]
+            _SAVE_FILE.write_text(json.dumps(data, indent=2))
+        except Exception:
+            logger.exception("Failed to save stations")
+
+    def _load(self) -> None:
+        if not _SAVE_FILE.exists():
+            return
+        try:
+            data = json.loads(_SAVE_FILE.read_text())
+            for item in data:
+                # Reset transient playback state on load
+                item["status"] = StationStatus.idle
+                station = Station.model_validate(item)
+                self._stations[station.id] = station
+            logger.info("Loaded %d station(s) from %s", len(self._stations), _SAVE_FILE)
+        except Exception:
+            logger.exception("Failed to load stations from %s", _SAVE_FILE)
 
     # ------------------------------------------------------------------
     # CRUD
@@ -21,6 +54,7 @@ class StationManager:
             random.shuffle(tracks)
         station = Station(name=name, genre=genre, queue=tracks, shuffle=shuffle)
         self._stations[station.id] = station
+        self._save()
         return station
 
     def get_station(self, station_id: str) -> Optional[Station]:
@@ -30,34 +64,24 @@ class StationManager:
         return list(self._stations.values())
 
     def delete_station(self, station_id: str) -> bool:
-        return self._stations.pop(station_id, None) is not None
+        removed = self._stations.pop(station_id, None) is not None
+        if removed:
+            self._save()
+        return removed
 
     # ------------------------------------------------------------------
-    # Playback controls (queue logic only — no audio yet)
+    # Queue controls
     # ------------------------------------------------------------------
-
-    def play(self, station_id: str) -> Optional[Track]:
-        station = self._get_or_raise(station_id)
-        station.status = StationStatus.playing
-        return station.current_track
-
-    def pause(self, station_id: str) -> None:
-        station = self._get_or_raise(station_id)
-        station.status = StationStatus.paused
 
     def skip(self, station_id: str) -> Optional[Track]:
         station = self._get_or_raise(station_id)
-        track = station.advance()
-        if track is None:
-            station.status = StationStatus.idle
-        return track
+        return station.advance()
 
     def previous(self, station_id: str) -> Optional[Track]:
         station = self._get_or_raise(station_id)
         return station.rewind()
 
     async def refill_queue(self, station_id: str) -> Station:
-        """Re-fetch tracks from Jellyfin and reset the queue."""
         station = self._get_or_raise(station_id)
         tracks = await jellyfin.get_tracks_by_genre(station.genre)
         if station.shuffle:
@@ -65,6 +89,7 @@ class StationManager:
         station.queue = tracks
         station.current_index = 0
         station.status = StationStatus.idle
+        self._save()
         return station
 
     # ------------------------------------------------------------------

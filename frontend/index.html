@@ -215,6 +215,19 @@
       </div>
     </div>
 
+    <div class="panel" style="margin-bottom:16px">
+      <div class="panel-header">Announcer Voice</div>
+      <div class="panel-body">
+        <div class="field" style="margin-bottom:8px">
+          <label>Voice</label>
+          <select id="voiceSelect" onchange="saveVoice()">
+            <option value="">— loading voices —</option>
+          </select>
+        </div>
+        <button class="btn btn-ghost" style="font-size:0.8rem;padding:5px 10px" onclick="previewVoice()">Preview voice</button>
+      </div>
+    </div>
+
     <div class="panel">
       <div class="panel-header">Stations</div>
       <div class="panel-body" id="stationList">
@@ -420,6 +433,44 @@ async function refill() {
   await renderNowPlaying();
 }
 
+// ── Voice picker ─────────────────────────────────────────────────────────────
+let voices = [];
+
+function loadVoices() {
+  voices = window.speechSynthesis?.getVoices() ?? [];
+  if (!voices.length) return;
+  const sel = document.getElementById('voiceSelect');
+  const saved = localStorage.getItem('jellyfm-voice');
+  sel.innerHTML = voices.map((v, i) =>
+    `<option value="${i}" ${saved == i ? 'selected' : ''}>${v.name} (${v.lang})</option>`
+  ).join('');
+}
+
+function saveVoice() {
+  const idx = document.getElementById('voiceSelect').value;
+  localStorage.setItem('jellyfm-voice', idx);
+}
+
+function getSelectedVoice() {
+  const idx = parseInt(localStorage.getItem('jellyfm-voice') ?? '0', 10);
+  return voices[idx] ?? null;
+}
+
+function previewVoice() {
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance("Hey there. I'm your JellyFM announcer.");
+  utt.voice = getSelectedVoice();
+  utt.rate = 1.05;
+  window.speechSynthesis.speak(utt);
+}
+
+// Voices load asynchronously in most browsers
+if (window.speechSynthesis) {
+  window.speechSynthesis.onvoiceschanged = loadVoices;
+  loadVoices(); // also try immediately (Firefox)
+}
+
 // ── TTS via Web Speech API ────────────────────────────────────────────────────
 const BANTER = {
   rock:       ["Buckle up — serious riff energy.", "Nothing fixes a bad day like a power chord.", "Turn it up. Your neighbours have headphones."],
@@ -444,6 +495,7 @@ function announce(current, next) {
   let text = `${banter}  Coming up: ${current.name} by ${current.artist}.`;
   if (next) text += `  And after that: ${next.name} by ${next.artist}.`;
   const utt = new SpeechSynthesisUtterance(text);
+  utt.voice = getSelectedVoice();
   utt.rate = 1.05;
   utt.volume = 0.9;
   window.speechSynthesis.speak(utt);
