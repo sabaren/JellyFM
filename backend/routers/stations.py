@@ -8,7 +8,7 @@ from ..models.station import Station
 from ..models.jellyfin import Track
 from ..services.station_manager import station_manager
 from ..services.jellyfin import jellyfin
-from ..services.espeak import synthesize as espeak_synthesize, is_available as espeak_available
+from ..services import tts_manager
 from ..services.banter import get_banter
 
 router = APIRouter(prefix="/stations", tags=["stations"])
@@ -130,7 +130,7 @@ async def announce(station_id: str):
     station = station_manager.get_station(station_id)
     if not station:
         raise HTTPException(status_code=404, detail="Station not found")
-    if not espeak_available():
+    if not tts_manager.is_available():
         return Response(status_code=204)
 
     current = station.current_track
@@ -148,7 +148,7 @@ async def announce(station_id: str):
         n_artist = nxt.tts_artist or nxt.artist
         text += f"  And after that: {n_name} by {n_artist}."
 
-    wav = await espeak_synthesize(text)
+    wav = await tts_manager.synthesize(text)
     if not wav:
         return Response(status_code=204)
     return Response(content=wav, media_type="audio/wav")

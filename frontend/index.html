@@ -232,7 +232,7 @@
         <div id="serverVoiceSection" style="display:none">
           <div class="field" style="margin-bottom:8px">
             <label>Server voice (espeak)</label>
-            <select id="espeakSelect" onchange="setEspeakVoice()">
+            <select id="espeakSelect" onchange="setServerVoice()">
               <option value="">— loading —</option>
             </select>
           </div>
@@ -517,28 +517,53 @@ function initVoices() {
 }
 
 function _voicePanelFallback() {
-  // Browser TTS not available — switch to server espeak UI
   document.getElementById('browserVoiceSection').style.display = 'none';
   document.getElementById('serverVoiceSection').style.display = '';
-  loadEspeakVoices();
+  loadServerVoices();
 }
 
-// ── Server-side espeak voice picker ─────────────────────────────────────────
-async function loadEspeakVoices() {
+// ── Server-side voice picker (Piper + espeak) ────────────────────────────────
+async function loadServerVoices() {
   try {
     const r = await fetch(`${API}/tts/voices`);
-    const presets = await r.json();
+    const data = await r.json();
     const sel = document.getElementById('espeakSelect');
-    const saved = localStorage.getItem('jellyfm-espeak-voice') || '';
-    sel.innerHTML = presets.map(p =>
-      `<option value="${esc(p.id)}" ${p.id === saved ? 'selected' : ''}>${esc(p.label)}${p.available ? '' : ' (install espeak-ng)'}</option>`
-    ).join('');
+    const saved = localStorage.getItem('jellyfm-server-voice') || '';
+
+    // Group into Piper and espeak optgroups when both present
+    const piperVoices  = data.voices.filter(v => v.engine === 'piper');
+    const espeakVoices = data.voices.filter(v => v.engine === 'espeak');
+
+    let html = '';
+    if (piperVoices.length) {
+      html += `<optgroup label="Piper (Neural)">`;
+      html += piperVoices.map(v =>
+        `<option value="${esc(v.id)}" ${v.id === saved ? 'selected' : ''}>${esc(v.label)}</option>`
+      ).join('');
+      html += `</optgroup>`;
+    }
+    if (espeakVoices.length) {
+      html += `<optgroup label="espeak (Fallback)">`;
+      html += espeakVoices.map(v =>
+        `<option value="${esc(v.id)}" ${v.id === saved ? 'selected' : ''}>${esc(v.label)}</option>`
+      ).join('');
+      html += `</optgroup>`;
+    }
+    if (!html) html = `<option value="">No server TTS available — install espeak-ng or Piper</option>`;
+    sel.innerHTML = html;
+
+    // Auto-select saved or first option
+    if (!saved && sel.options.length) {
+      sel.selectedIndex = 0;
+      await setServerVoice();
+    }
   } catch {}
 }
 
-async function setEspeakVoice() {
+async function setServerVoice() {
   const id = document.getElementById('espeakSelect').value;
-  localStorage.setItem('jellyfm-espeak-voice', id);
+  if (!id) return;
+  localStorage.setItem('jellyfm-server-voice', id);
   await fetch(`${API}/tts/voice`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -546,11 +571,11 @@ async function setEspeakVoice() {
   });
 }
 
+// Keep old name as alias so existing onclick= still works
+const setEspeakVoice = setServerVoice;
+
 async function previewEspeakVoice() {
-  // Trigger a short server-side announcement to preview the current voice.
-  // We reuse /stations/{id}/announce if a station is selected, otherwise
-  // hit the voice endpoint directly.
-  await setEspeakVoice();
+  await setServerVoice();
   if (!selectedId) { toast('Select a station first to preview', true); return; }
   try {
     const r = await fetch(`${API}/stations/${selectedId}/announce`);
