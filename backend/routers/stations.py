@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from typing import Optional
 import httpx
@@ -8,6 +8,8 @@ from ..models.station import Station
 from ..models.jellyfin import Track
 from ..services.station_manager import station_manager
 from ..services.jellyfin import jellyfin
+from ..services.espeak import synthesize as espeak_synthesize, is_available as espeak_available
+from ..services.banter import get_banter
 
 router = APIRouter(prefix="/stations", tags=["stations"])
 
@@ -115,6 +117,41 @@ async def refill_queue(station_id: str):
         raise HTTPException(status_code=404, detail="Station not found")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ------------------------------------------------------------------
+# Server-side TTS announcement
+# Used by browsers that block Web Speech API (e.g. GrapheneOS Vanadium).
+# Returns WAV audio of the announcement, or 204 if espeak is unavailable.
+# ------------------------------------------------------------------
+
+@router.get("/{station_id}/announce")
+async def announce(station_id: str):
+    station = station_manager.get_station(station_id)
+    if not station:
+        raise HTTPException(status_code=404, detail="Station not found")
+    if not espeak_available():
+        return Response(status_code=204)
+
+    current = station.current_track
+    if not current:
+        return Response(status_code=204)
+
+    banter = get_banter(current.genre)
+    name   = current.tts_name   or current.name
+    artist = current.tts_artist or current.artist
+    text   = f"{banter}  Coming up: {name} by {artist}."
+
+    nxt = station.next_track
+    if nxt:
+        n_name   = nxt.tts_name   or nxt.name
+        n_artist = nxt.tts_artist or nxt.artist
+        text += f"  And after that: {n_name} by {n_artist}."
+
+    wav = await espeak_synthesize(text)
+    if not wav:
+        return Response(status_code=204)
+    return Response(content=wav, media_type="audio/wav")
 
 
 # ------------------------------------------------------------------
