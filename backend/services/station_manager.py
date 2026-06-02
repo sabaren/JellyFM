@@ -36,6 +36,7 @@ class StationManager:
             return
         try:
             data = json.loads(_SAVE_FILE.read_text())
+            needs_save = False
             for item in data:
                 item["status"] = StationStatus.idle
                 station = Station.model_validate(item)
@@ -43,10 +44,15 @@ class StationManager:
                 for track in station.queue:
                     if track.tts_name is None:
                         track.tts_name = romanize(track.name)
+                        needs_save = True
                     if track.tts_artist is None:
                         track.tts_artist = romanize(track.artist)
+                        needs_save = True
                 self._stations[station.id] = station
             logger.info("Loaded %d station(s) from %s", len(self._stations), _SAVE_FILE)
+            if needs_save:
+                logger.info("Persisting backfilled tts_name/tts_artist to disk")
+                self._save()
         except Exception:
             logger.exception("Failed to load stations from %s", _SAVE_FILE)
 
