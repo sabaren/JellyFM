@@ -8,6 +8,7 @@ from typing import Optional
 from ..models.station import Station, StationStatus
 from ..models.jellyfin import Track
 from .jellyfin import jellyfin
+from .romanize import romanize
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +37,14 @@ class StationManager:
         try:
             data = json.loads(_SAVE_FILE.read_text())
             for item in data:
-                # Reset transient playback state on load
                 item["status"] = StationStatus.idle
                 station = Station.model_validate(item)
+                # Backfill tts_name/tts_artist for tracks saved before romanization
+                for track in station.queue:
+                    if track.tts_name is None:
+                        track.tts_name = romanize(track.name)
+                    if track.tts_artist is None:
+                        track.tts_artist = romanize(track.artist)
                 self._stations[station.id] = station
             logger.info("Loaded %d station(s) from %s", len(self._stations), _SAVE_FILE)
         except Exception:
