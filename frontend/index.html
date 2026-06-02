@@ -375,10 +375,8 @@ async function play() {
   const np = await fetchNowPlaying();
   if (!np?.current) { toast('Queue is empty — try Refill', true); return; }
 
-  announce(np.current, np.next);
-
-  // Small gap after TTS before audio starts
-  await sleep(announcementDuration(np.current, np.next) + 400);
+  await announce(selectedId, np.current, np.next);
+  await sleep(400);
 
   audio.src = `${API}/stations/${selectedId}/stream`;
   audio.load();
@@ -473,8 +471,14 @@ function previewVoice() {
   window.speechSynthesis.speak(utt);
 }
 
+// Whether Web Speech API is usable (set to false after timeout with no voices)
+let browserTTSAvailable = !!window.speechSynthesis;
+
 function initVoices() {
-  if (!window.speechSynthesis) return;
+  if (!window.speechSynthesis) {
+    _voicePanelFallback();
+    return;
+  }
 
   // 1. Try immediately — works in Firefox and some Android Chrome builds
   if (loadVoices()) return;
@@ -482,18 +486,26 @@ function initVoices() {
   // 2. Standard event — works reliably on desktop Chrome
   window.speechSynthesis.onvoiceschanged = () => loadVoices();
 
-  // 3. Poll every 250ms — iOS Safari populates voices late and
-  //    doesn't always fire onvoiceschanged reliably
+  // 3. Poll every 250ms — iOS Safari populates voices late
   const poll = setInterval(() => {
     _voicePollAttempts++;
-    if (loadVoices() || _voicePollAttempts > 20) clearInterval(poll);
+    if (loadVoices()) { clearInterval(poll); return; }
+    if (_voicePollAttempts > 20) {
+      clearInterval(poll);
+      // Gave up — browser is blocking Web Speech API (e.g. GrapheneOS Vanadium)
+      browserTTSAvailable = false;
+      _voicePanelFallback();
+    }
   }, 250);
 
-  // 4. Retry on first user gesture — iOS requires interaction before
-  //    the voice list becomes available
-  const onGesture = () => loadVoices();
-  document.addEventListener('touchstart', onGesture, { once: true });
-  document.addEventListener('click', onGesture, { once: true });
+  // 4. Retry on first user gesture — iOS requires interaction first
+  document.addEventListener('touchstart', () => loadVoices(), { once: true });
+  document.addEventListener('click',      () => loadVoices(), { once: true });
+}
+
+function _voicePanelFallback() {
+  const sel = document.getElementById('voiceSelect');
+  if (sel) sel.outerHTML = '<p style="color:var(--muted);font-size:0.8rem">Voice announcements use the server (espeak). Install espeak-ng on the Pi for audio.</p>';
 }
 
 // ── TTS via Web Speech API ────────────────────────────────────────────────────
@@ -513,32 +525,44 @@ function getBanter(genre) {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
-function announce(current, next) {
-  if (!window.speechSynthesis) return;
-  window.speechSynthesis.cancel();
-  const banter = getBanter(current.genre);
-  const name   = current.tts_name   || current.name;
-  const artist = current.tts_artist || current.artist;
-  let text = `${banter}  Coming up: ${name} by ${artist}.`;
-  if (next) {
-    const nName   = next.tts_name   || next.name;
-    const nArtist = next.tts_artist || next.artist;
-    text += `  And after that: ${nName} by ${nArtist}.`;
+// Returns a promise that resolves when the announcement finishes playing.
+async function announce(stationId, current, next) {
+  if (browserTTSAvailable && voices.length) {
+    // Path A: browser Web Speech API
+    await new Promise(resolve => {
+      window.speechSynthesis.cancel();
+      const banter = getBanter(current.genre);
+      const name   = current.tts_name   || current.name;
+      const artist = current.tts_artist || current.artist;
+      let text = `${banter}  Coming up: ${name} by ${artist}.`;
+      if (next) {
+        text += `  And after that: ${next.tts_name || next.name} by ${next.tts_artist || next.artist}.`;
+      }
+      const utt = new SpeechSynthesisUtterance(text);
+      utt.voice = getSelectedVoice();
+      utt.rate = 1.05;
+      utt.volume = 0.9;
+      utt.onend = resolve;
+      utt.onerror = resolve;  // don't block music if TTS errors
+      window.speechSynthesis.speak(utt);
+    });
+  } else {
+    // Path B: server-side espeak — fetch WAV and play it
+    try {
+      const r = await fetch(`${API}/stations/${stationId}/announce`);
+      if (r.ok && r.status !== 204) {
+        const blob = await r.blob();
+        const url  = URL.createObjectURL(blob);
+        await new Promise(resolve => {
+          const a = new Audio(url);
+          a.onended = resolve;
+          a.onerror = resolve;
+          a.play().catch(resolve);
+        });
+        URL.revokeObjectURL(url);
+      }
+    } catch { /* skip announcement on error */ }
   }
-  const utt = new SpeechSynthesisUtterance(text);
-  utt.voice = getSelectedVoice();
-  utt.rate = 1.05;
-  utt.volume = 0.9;
-  window.speechSynthesis.speak(utt);
-}
-
-function announcementDuration(current, next) {
-  const banter = getBanter(current.genre);
-  const name   = current.tts_name   || current.name;
-  const artist = current.tts_artist || current.artist;
-  let text = `${banter} Coming up: ${name} by ${artist}.`;
-  if (next) text += ` And after that: ${next.tts_name || next.name} by ${next.tts_artist || next.artist}.`;
-  return (text.length / 2.3) * 100;
 }
 
 // ── Now Playing UI ────────────────────────────────────────────────────────────
