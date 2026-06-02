@@ -13,8 +13,29 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# espeak-ng is preferred; fall back to espeak if available
 _ESPEAK = shutil.which("espeak-ng") or shutil.which("espeak")
+
+# Voice presets — (id, label, espeak_voice_string)
+VOICE_PRESETS = [
+    ("male-us",     "Male — US",        "en-us+m3"),
+    ("female-us",   "Female — US",      "en-us+f3"),
+    ("male-uk",     "Male — UK",        "en+m3"),
+    ("female-uk",   "Female — UK",      "en+f3"),
+    ("male-warm",   "Male — Warm",      "en-us+m5"),
+    ("female-soft", "Female — Soft",    "en-us+f1"),
+]
+
+# Active voice — can be changed at runtime via the API
+_active_voice: str = VOICE_PRESETS[0][2]  # default: male US
+
+
+def set_voice(preset_id: str) -> bool:
+    global _active_voice
+    for pid, _, vstr in VOICE_PRESETS:
+        if pid == preset_id:
+            _active_voice = vstr
+            return True
+    return False
 
 
 def is_available() -> bool:
@@ -22,19 +43,15 @@ def is_available() -> bool:
 
 
 async def synthesize(text: str, rate: int = 150, pitch: int = 50) -> Optional[bytes]:
-    """
-    Synthesize *text* to WAV bytes using espeak.
-    Returns None if espeak is unavailable or synthesis fails.
-    """
     if not _ESPEAK:
         return None
     try:
         proc = await asyncio.create_subprocess_exec(
             _ESPEAK,
             "--stdout",
-            "-v", "en",
-            "-s", str(rate),   # words per minute
-            "-p", str(pitch),  # pitch 0-99
+            "-v", _active_voice,
+            "-s", str(rate),
+            "-p", str(pitch),
             text,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,

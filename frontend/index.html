@@ -217,14 +217,27 @@
 
     <div class="panel" style="margin-bottom:16px">
       <div class="panel-header">Announcer Voice</div>
-      <div class="panel-body">
-        <div class="field" style="margin-bottom:8px">
-          <label>Voice</label>
-          <select id="voiceSelect" onchange="saveVoice()">
-            <option value="">— loading voices —</option>
-          </select>
+      <div class="panel-body" id="voicePanel">
+        <!-- Browser TTS path (populated by initVoices) -->
+        <div id="browserVoiceSection">
+          <div class="field" style="margin-bottom:8px">
+            <label>Voice</label>
+            <select id="voiceSelect" onchange="saveVoice()">
+              <option value="">— loading voices —</option>
+            </select>
+          </div>
+          <button class="btn btn-ghost" style="font-size:0.8rem;padding:5px 10px" onclick="previewVoice()">Preview voice</button>
         </div>
-        <button class="btn btn-ghost" style="font-size:0.8rem;padding:5px 10px" onclick="previewVoice()">Preview voice</button>
+        <!-- Server TTS path (shown when browser TTS unavailable) -->
+        <div id="serverVoiceSection" style="display:none">
+          <div class="field" style="margin-bottom:8px">
+            <label>Server voice (espeak)</label>
+            <select id="espeakSelect" onchange="setEspeakVoice()">
+              <option value="">— loading —</option>
+            </select>
+          </div>
+          <button class="btn btn-ghost" style="font-size:0.8rem;padding:5px 10px" onclick="previewEspeakVoice()">Preview voice</button>
+        </div>
       </div>
     </div>
 
@@ -504,8 +517,53 @@ function initVoices() {
 }
 
 function _voicePanelFallback() {
-  const sel = document.getElementById('voiceSelect');
-  if (sel) sel.outerHTML = '<p style="color:var(--muted);font-size:0.8rem">Voice announcements use the server (espeak). Install espeak-ng on the Pi for audio.</p>';
+  // Browser TTS not available — switch to server espeak UI
+  document.getElementById('browserVoiceSection').style.display = 'none';
+  document.getElementById('serverVoiceSection').style.display = '';
+  loadEspeakVoices();
+}
+
+// ── Server-side espeak voice picker ─────────────────────────────────────────
+async function loadEspeakVoices() {
+  try {
+    const r = await fetch(`${API}/tts/voices`);
+    const presets = await r.json();
+    const sel = document.getElementById('espeakSelect');
+    const saved = localStorage.getItem('jellyfm-espeak-voice') || '';
+    sel.innerHTML = presets.map(p =>
+      `<option value="${esc(p.id)}" ${p.id === saved ? 'selected' : ''}>${esc(p.label)}${p.available ? '' : ' (install espeak-ng)'}</option>`
+    ).join('');
+  } catch {}
+}
+
+async function setEspeakVoice() {
+  const id = document.getElementById('espeakSelect').value;
+  localStorage.setItem('jellyfm-espeak-voice', id);
+  await fetch(`${API}/tts/voice`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ voice_id: id }),
+  });
+}
+
+async function previewEspeakVoice() {
+  // Trigger a short server-side announcement to preview the current voice.
+  // We reuse /stations/{id}/announce if a station is selected, otherwise
+  // hit the voice endpoint directly.
+  await setEspeakVoice();
+  if (!selectedId) { toast('Select a station first to preview', true); return; }
+  try {
+    const r = await fetch(`${API}/stations/${selectedId}/announce`);
+    if (r.ok && r.status !== 204) {
+      const blob = await r.blob();
+      const url  = URL.createObjectURL(blob);
+      const a = new Audio(url);
+      a.onended = () => URL.revokeObjectURL(url);
+      a.play();
+    } else {
+      toast('espeak-ng not installed on the server', true);
+    }
+  } catch (e) { toast(e.message, true); }
 }
 
 // ── TTS via Web Speech API ────────────────────────────────────────────────────
