@@ -270,6 +270,8 @@ let selectedId = null;
 let genres = [];
 let isPlaying = false;
 let progressTimer = null;
+let _errorRetries = 0;
+const MAX_RETRIES = 2;
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 async function init() {
@@ -277,12 +279,26 @@ async function init() {
   await Promise.all([checkHealth(), loadGenres()]);
   await loadStations();
 
-  // When a track finishes naturally, skip to next
-  audio.addEventListener('ended', () => advanceTrack());
-  audio.addEventListener('error', (e) => {
+  // When a track finishes naturally, reset retries and move on
+  audio.addEventListener('ended', () => { _errorRetries = 0; advanceTrack(); });
+
+  // On error: retry the same track up to MAX_RETRIES times with a short
+  // delay (handles transient network hiccups), then skip to next track.
+  audio.addEventListener('error', async (e) => {
     console.error('Audio error', e);
-    toast('Playback error — skipping', true);
-    advanceTrack();
+    if (_errorRetries < MAX_RETRIES) {
+      _errorRetries++;
+      toast(`Stream error — retrying (${_errorRetries}/${MAX_RETRIES})…`);
+      await sleep(2000 * _errorRetries);  // 2s, then 4s
+      const src = audio.src;
+      audio.src = '';
+      audio.src = src;
+      try { await audio.play(); } catch (_) {}
+    } else {
+      _errorRetries = 0;
+      toast('Stream failed after retries — skipping', true);
+      advanceTrack();
+    }
   });
 
   // Keep progress bar ticking
@@ -384,6 +400,7 @@ async function deleteStation(id) {
 
 // ── Playback ─────────────────────────────────────────────────────────────────
 async function play() {
+  _errorRetries = 0;
   if (!selectedId) return;
   const np = await fetchNowPlaying();
   if (!np?.current) { toast('Queue is empty — try Refill', true); return; }
