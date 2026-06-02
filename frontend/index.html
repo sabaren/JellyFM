@@ -260,6 +260,7 @@ let progressTimer = null;
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 async function init() {
+  initVoices();
   await Promise.all([checkHealth(), loadGenres()]);
   await loadStations();
 
@@ -435,17 +436,22 @@ async function refill() {
 
 // ── Voice picker ─────────────────────────────────────────────────────────────
 let voices = [];
+let _voicePollAttempts = 0;
 
 function loadVoices() {
   const all = window.speechSynthesis?.getVoices() ?? [];
-  // Keep only English voices — non-English voices mispronounce romanized Japanese
+  if (!all.length) return false;  // not ready yet
+
   voices = all.filter(v => v.lang.startsWith('en'));
-  if (!voices.length) voices = all;  // fall back to all if no English found
+  if (!voices.length) voices = all;  // fallback: show all if no English voices found
+
   const sel = document.getElementById('voiceSelect');
+  if (!sel) return true;
   const saved = localStorage.getItem('jellyfm-voice');
   sel.innerHTML = voices.map((v, i) =>
     `<option value="${i}" ${saved === String(i) ? 'selected' : ''}>${v.name}</option>`
   ).join('');
+  return true;
 }
 
 function saveVoice() {
@@ -467,10 +473,27 @@ function previewVoice() {
   window.speechSynthesis.speak(utt);
 }
 
-// Voices load asynchronously in most browsers
-if (window.speechSynthesis) {
-  window.speechSynthesis.onvoiceschanged = loadVoices;
-  loadVoices(); // also try immediately (Firefox)
+function initVoices() {
+  if (!window.speechSynthesis) return;
+
+  // 1. Try immediately — works in Firefox and some Android Chrome builds
+  if (loadVoices()) return;
+
+  // 2. Standard event — works reliably on desktop Chrome
+  window.speechSynthesis.onvoiceschanged = () => loadVoices();
+
+  // 3. Poll every 250ms — iOS Safari populates voices late and
+  //    doesn't always fire onvoiceschanged reliably
+  const poll = setInterval(() => {
+    _voicePollAttempts++;
+    if (loadVoices() || _voicePollAttempts > 20) clearInterval(poll);
+  }, 250);
+
+  // 4. Retry on first user gesture — iOS requires interaction before
+  //    the voice list becomes available
+  const onGesture = () => loadVoices();
+  document.addEventListener('touchstart', onGesture, { once: true });
+  document.addEventListener('click', onGesture, { once: true });
 }
 
 // ── TTS via Web Speech API ────────────────────────────────────────────────────
