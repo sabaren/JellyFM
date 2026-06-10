@@ -5,3 +5,7 @@ pydantic==2.7.1
 pydantic-settings==2.2.1
 python-dotenv==1.0.1
 pykakasi==2.2.1
+# Kokoro ONNX neural TTS (replaces Piper)
+kokoro-onnx
+soundfile
+onnxruntime
