@@ -1,27 +1,26 @@
 """
-TTS manager — picks the best available engine: Piper > espeak > nothing.
+TTS manager — priority chain: Kokoro (neural) > espeak (fallback) > nothing.
 All callers should import from here rather than the individual services.
 """
 from typing import Optional
-from . import piper, espeak
+from . import kokoro, espeak
 
 
 def best_engine() -> str:
-    if piper.is_available():
-        return "piper"
+    if kokoro.is_available():
+        return "kokoro"
     if espeak.is_available():
         return "espeak"
     return "none"
 
 
 async def synthesize(text: str) -> Optional[bytes]:
-    if piper.is_available():
-        result = await piper.synthesize(text)
+    if kokoro.is_available():
+        result = await kokoro.synthesize(text)
         if result:
             return result
-    # Fall back to espeak
     return await espeak.synthesize(text)
 
 
 def is_available() -> bool:
-    return piper.is_available() or espeak.is_available()
+    return kokoro.is_available() or espeak.is_available()
