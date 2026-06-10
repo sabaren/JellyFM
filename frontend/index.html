@@ -45,7 +45,7 @@
     background: var(--muted); margin-left: auto;
     transition: background 0.3s;
   }
-  .status-dot.ok { background: var(--success); }
+  .status-dot.ok  { background: var(--success); }
   .status-dot.err { background: var(--danger); }
 
   main {
@@ -117,9 +117,8 @@
     display: inline-block; padding: 1px 7px; border-radius: 99px;
     font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
   }
-  .badge-playing { background: #1a3a2a; color: var(--success); }
-  .badge-idle    { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
-  .badge-paused  { background: #2a2a1a; color: #facc15; }
+  .badge-live { background: #1a3a2a; color: var(--success); }
+  .badge-idle { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
 
   /* Now playing */
   .now-playing-card {
@@ -127,28 +126,28 @@
     border: 1px solid var(--border); margin-bottom: 16px;
     min-height: 100px; display: flex; flex-direction: column; justify-content: center;
   }
-  .track-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 2px; }
+  .track-title  { font-size: 1.1rem; font-weight: 700; margin-bottom: 2px; }
   .track-artist { color: var(--muted); margin-bottom: 2px; }
-  .track-album { font-size: 0.78rem; color: var(--muted); }
+  .track-album  { font-size: 0.78rem; color: var(--muted); }
   .track-next {
     margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
     font-size: 0.8rem; color: var(--muted);
   }
   .track-next strong { color: var(--text); }
 
-  /* Progress bar */
-  .progress-wrap {
-    margin: 14px 0 4px;
+  /* Elapsed timer */
+  .elapsed-row {
+    margin-top: 10px;
     display: flex; align-items: center; gap: 10px;
+    font-size: 0.78rem; color: var(--muted);
   }
-  progress {
-    flex: 1; height: 4px; border-radius: 2px;
-    appearance: none; background: var(--border);
+  .elapsed-bar-wrap {
+    flex: 1; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden;
   }
-  progress::-webkit-progress-bar { background: var(--border); border-radius: 2px; }
-  progress::-webkit-progress-value { background: var(--accent); border-radius: 2px; transition: width 0.5s linear; }
-  progress::-moz-progress-bar { background: var(--accent); border-radius: 2px; }
-  .time { font-size: 0.75rem; color: var(--muted); min-width: 36px; text-align: right; }
+  .elapsed-bar {
+    height: 100%; background: var(--accent); border-radius: 2px;
+    transition: width 1s linear;
+  }
 
   /* Volume */
   .volume-row {
@@ -162,6 +161,16 @@
 
   .transport { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; align-items: center; }
 
+  .live-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 9px; border-radius: 99px; font-size: 0.7rem; font-weight: 700;
+    background: #1a3a2a; color: var(--success); text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .live-dot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--success);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
   .empty { color: var(--muted); font-size: 0.875rem; }
 
   #toast {
@@ -173,12 +182,10 @@
     transition: opacity 0.2s, transform 0.2s;
     pointer-events: none; z-index: 9999;
   }
-  #toast.show { opacity: 1; transform: translateY(0); }
-  #toast.err { border-color: var(--danger); color: var(--danger); }
+  #toast.show     { opacity: 1; transform: translateY(0); }
+  #toast.err      { border-color: var(--danger); color: var(--danger); }
 
-  /* Spinning animation for playing state */
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-  .badge-playing { animation: pulse 2s ease-in-out infinite; }
 </style>
 </head>
 <body>
@@ -188,11 +195,11 @@
   <div id="statusDot" class="status-dot" title="Server status"></div>
 </header>
 
-<!-- Hidden audio element — the actual player -->
-<audio id="player" preload="auto"></audio>
+<!-- Hidden audio element — attaches to the live server broadcast -->
+<audio id="player" preload="none"></audio>
 
 <main>
-  <!-- Left: create + list -->
+  <!-- Left: create + list + voice picker -->
   <div>
     <div class="panel" style="margin-bottom:16px">
       <div class="panel-header">New Station</div>
@@ -217,27 +224,14 @@
 
     <div class="panel" style="margin-bottom:16px">
       <div class="panel-header">Announcer Voice</div>
-      <div class="panel-body" id="voicePanel">
-        <!-- Browser TTS path (populated by initVoices) -->
-        <div id="browserVoiceSection">
-          <div class="field" style="margin-bottom:8px">
-            <label>Voice</label>
-            <select id="voiceSelect" onchange="saveVoice()">
-              <option value="">— loading voices —</option>
-            </select>
-          </div>
-          <button class="btn btn-ghost" style="font-size:0.8rem;padding:5px 10px" onclick="previewVoice()">Preview voice</button>
+      <div class="panel-body">
+        <div class="field" style="margin-bottom:8px">
+          <label>Server voice</label>
+          <select id="voiceSelect" onchange="setServerVoice()">
+            <option value="">— loading —</option>
+          </select>
         </div>
-        <!-- Server TTS path (shown when browser TTS unavailable) -->
-        <div id="serverVoiceSection" style="display:none">
-          <div class="field" style="margin-bottom:8px">
-            <label>Server voice (espeak)</label>
-            <select id="espeakSelect" onchange="setServerVoice()">
-              <option value="">— loading —</option>
-            </select>
-          </div>
-          <button class="btn btn-ghost" style="font-size:0.8rem;padding:5px 10px" onclick="previewEspeakVoice()">Preview voice</button>
-        </div>
+        <button class="btn btn-ghost" style="font-size:0.8rem;padding:5px 10px" onclick="previewVoice()">Preview voice</button>
       </div>
     </div>
 
@@ -263,46 +257,29 @@
 <div id="toast"></div>
 
 <script>
-const API = '';
+const API   = '';
 const audio = document.getElementById('player');
 
-let selectedId = null;
-let genres = [];
-let isPlaying = false;
-let progressTimer = null;
-let _errorRetries = 0;
-const MAX_RETRIES = 2;
+let selectedId   = null;
+let isPlaying    = false;
+let pollInterval = null;
+let lastTrackId  = null;   // detect track changes in poll
 
-// ── Bootstrap ────────────────────────────────────────────────────────────────
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
 async function init() {
-  initVoices();
-  await Promise.all([checkHealth(), loadGenres()]);
+  await Promise.all([checkHealth(), loadGenres(), loadServerVoices()]);
   await loadStations();
 
-  // When a track finishes naturally, reset retries and move on
-  audio.addEventListener('ended', () => { _errorRetries = 0; advanceTrack(); });
-
-  // On error: retry the same track up to MAX_RETRIES times with a short
-  // delay (handles transient network hiccups), then skip to next track.
-  audio.addEventListener('error', async (e) => {
-    console.error('Audio error', e);
-    if (_errorRetries < MAX_RETRIES) {
-      _errorRetries++;
-      toast(`Stream error — retrying (${_errorRetries}/${MAX_RETRIES})…`);
-      await sleep(2000 * _errorRetries);  // 2s, then 4s
-      const src = audio.src;
-      audio.src = '';
-      audio.src = src;
-      try { await audio.play(); } catch (_) {}
-    } else {
-      _errorRetries = 0;
-      toast('Stream failed after retries — skipping', true);
-      advanceTrack();
-    }
+  audio.addEventListener('error', (e) => {
+    console.error('Stream error', e);
+    toast('Stream error — reconnecting…', true);
+    // Brief delay then re-attach to keep the stream alive
+    setTimeout(() => {
+      if (isPlaying && selectedId) {
+        attachStream(selectedId);
+      }
+    }, 3000);
   });
-
-  // Keep progress bar ticking
-  audio.addEventListener('timeupdate', updateProgress);
 }
 
 async function checkHealth() {
@@ -317,7 +294,7 @@ async function checkHealth() {
 async function loadGenres() {
   try {
     const r = await fetch(`${API}/genres`);
-    genres = await r.json();
+    const genres = await r.json();
     const sel = document.getElementById('newGenre');
     sel.innerHTML = genres.length
       ? genres.map(g => `<option value="${esc(g.name)}">${esc(g.name)}${g.track_count ? ` (${g.track_count})` : ''}</option>`).join('')
@@ -325,7 +302,7 @@ async function loadGenres() {
   } catch { toast('Could not reach server', true); }
 }
 
-// ── Stations ─────────────────────────────────────────────────────────────────
+// ── Stations ──────────────────────────────────────────────────────────────────
 async function loadStations() {
   try {
     const r = await fetch(`${API}/stations`);
@@ -338,12 +315,12 @@ function renderStationList(stations) {
   const el = document.getElementById('stationList');
   if (!stations.length) { el.innerHTML = '<p class="empty">No stations yet.</p>'; return; }
   el.innerHTML = stations.map(s => {
-    const status = (selectedId === s.id) ? (isPlaying ? 'playing' : 'paused') : 'idle';
+    const live = (s.id === selectedId && isPlaying);
     return `
       <div class="station-item ${s.id === selectedId ? 'active' : ''}" onclick="selectStation('${s.id}')">
         <div style="display:flex;align-items:center;gap:8px">
           <span class="station-name">${esc(s.name)}</span>
-          <span class="badge badge-${status}">${status}</span>
+          <span class="badge ${live ? 'badge-live' : 'badge-idle'}">${live ? '● LIVE' : 'idle'}</span>
         </div>
         <span class="station-meta">${esc(s.genre)} · ${s.queue.length} tracks</span>
       </div>`;
@@ -351,8 +328,8 @@ function renderStationList(stations) {
 }
 
 async function createStation() {
-  const name = document.getElementById('newName').value.trim();
-  const genre = document.getElementById('newGenre').value;
+  const name    = document.getElementById('newName').value.trim();
+  const genre   = document.getElementById('newGenre').value;
   const shuffle = document.getElementById('newShuffle').checked;
   if (!name || !genre) { toast('Name and genre required', true); return; }
   const btn = document.getElementById('createBtn');
@@ -368,18 +345,13 @@ async function createStation() {
     document.getElementById('newName').value = '';
     toast(`Station "${station.name}" created`);
     await loadStations();
-    await selectStation(station.id);
+    selectStation(station.id);
   } catch (e) { toast(e.message, true); }
   finally { btn.disabled = false; }
 }
 
 async function selectStation(id) {
-  // Stop current playback if switching stations
-  if (selectedId && selectedId !== id) {
-    audio.pause();
-    audio.src = '';
-    isPlaying = false;
-  }
+  if (selectedId && selectedId !== id) stopStream();
   selectedId = id;
   await loadStations();
   await renderNowPlaying();
@@ -388,9 +360,7 @@ async function selectStation(id) {
 async function deleteStation(id) {
   if (!confirm('Delete this station?')) return;
   if (selectedId === id) {
-    audio.pause();
-    audio.src = '';
-    isPlaying = false;
+    stopStream();
     selectedId = null;
     document.getElementById('nowPlayingPanel').innerHTML = '<p class="empty">Create a station and hit Play.</p>';
   }
@@ -398,178 +368,190 @@ async function deleteStation(id) {
   await loadStations();
 }
 
-// ── Playback ─────────────────────────────────────────────────────────────────
-async function play() {
-  _errorRetries = 0;
-  if (!selectedId) return;
-  const np = await fetchNowPlaying();
-  if (!np?.current) { toast('Queue is empty — try Refill', true); return; }
-
-  await announce(selectedId, np.current, np.next);
-  await sleep(400);
-
-  audio.src = `${API}/stations/${selectedId}/stream`;
+// ── Stream controls ───────────────────────────────────────────────────────────
+function attachStream(id) {
+  // Re-attach with a cache-buster so the browser doesn't serve a stale response
+  audio.src = `${API}/stations/${id}/stream?t=${Date.now()}`;
   audio.load();
-  try {
-    await audio.play();
-    isPlaying = true;
-    await loadStations();
-    await renderNowPlaying();
-  } catch (e) {
-    toast('Browser blocked autoplay — click Play again', true);
-  }
+  audio.play().catch(() => toast('Tap screen first, then press Play', true));
 }
 
-function pause() {
-  if (audio.paused) {
-    audio.play();
-    isPlaying = true;
-  } else {
-    audio.pause();
-    isPlaying = false;
-  }
-  loadStations();
-  renderNowPlaying();
-}
-
-async function advanceTrack() {
+async function play() {
   if (!selectedId) return;
-  await fetch(`${API}/stations/${selectedId}/skip`, { method: 'POST' });
-  await play();
-}
-
-async function skipTrack() {
-  audio.pause();
-  audio.src = '';
-  isPlaying = false;
-  await advanceTrack();
-}
-
-async function previousTrack() {
-  audio.pause();
-  audio.src = '';
-  isPlaying = false;
-  await fetch(`${API}/stations/${selectedId}/previous`, { method: 'POST' });
-  await play();
-}
-
-async function refill() {
-  audio.pause();
-  audio.src = '';
-  isPlaying = false;
-  await fetch(`${API}/stations/${selectedId}/refill`, { method: 'POST' });
-  toast('Queue refilled');
+  attachStream(selectedId);
+  isPlaying = true;
+  startPolling();
+  await loadStations();
   await renderNowPlaying();
 }
 
-// ── Voice picker ─────────────────────────────────────────────────────────────
-let voices = [];
-let _voicePollAttempts = 0;
-
-function loadVoices() {
-  const all = window.speechSynthesis?.getVoices() ?? [];
-  if (!all.length) return false;  // not ready yet
-
-  voices = all.filter(v => v.lang.startsWith('en'));
-  if (!voices.length) voices = all;  // fallback: show all if no English voices found
-
-  const sel = document.getElementById('voiceSelect');
-  if (!sel) return true;
-  const saved = localStorage.getItem('jellyfm-voice');
-  sel.innerHTML = voices.map((v, i) =>
-    `<option value="${i}" ${saved === String(i) ? 'selected' : ''}>${v.name}</option>`
-  ).join('');
-  return true;
+function stopStream() {
+  audio.pause();
+  audio.src = '';
+  isPlaying = false;
+  stopPolling();
+  loadStations();
 }
 
-function saveVoice() {
-  const idx = document.getElementById('voiceSelect').value;
-  localStorage.setItem('jellyfm-voice', idx);
-}
-
-function getSelectedVoice() {
-  const idx = parseInt(localStorage.getItem('jellyfm-voice') ?? '0', 10);
-  return voices[idx] ?? null;
-}
-
-function previewVoice() {
-  if (!window.speechSynthesis) return;
-  window.speechSynthesis.cancel();
-  const utt = new SpeechSynthesisUtterance("Hey there. I'm your JellyFM announcer.");
-  utt.voice = getSelectedVoice();
-  utt.rate = 1.05;
-  window.speechSynthesis.speak(utt);
-}
-
-// Whether Web Speech API is usable (set to false after timeout with no voices)
-let browserTTSAvailable = !!window.speechSynthesis;
-
-function initVoices() {
-  if (!window.speechSynthesis) {
-    _voicePanelFallback();
-    return;
+async function togglePlay() {
+  if (isPlaying) {
+    stopStream();
+    renderNowPlaying();
+  } else {
+    await play();
   }
+}
 
-  // 1. Try immediately — works in Firefox and some Android Chrome builds
-  if (loadVoices()) return;
+async function skip() {
+  if (!selectedId) return;
+  await fetch(`${API}/stations/${selectedId}/skip`, { method: 'POST' });
+  toast('Skipping…');
+}
 
-  // 2. Standard event — works reliably on desktop Chrome
-  window.speechSynthesis.onvoiceschanged = () => loadVoices();
+async function refill() {
+  if (!selectedId) return;
+  await fetch(`${API}/stations/${selectedId}/refill`, { method: 'POST' });
+  toast('Queue refilled');
+}
 
-  // 3. Poll every 250ms — iOS Safari populates voices late
-  const poll = setInterval(() => {
-    _voicePollAttempts++;
-    if (loadVoices()) { clearInterval(poll); return; }
-    if (_voicePollAttempts > 20) {
-      clearInterval(poll);
-      // Gave up — browser is blocking Web Speech API (e.g. GrapheneOS Vanadium)
-      browserTTSAvailable = false;
-      _voicePanelFallback();
+// ── Now-playing poll ──────────────────────────────────────────────────────────
+function startPolling() {
+  stopPolling();
+  pollInterval = setInterval(pollNowPlaying, 2500);
+}
+
+function stopPolling() {
+  clearInterval(pollInterval);
+  pollInterval = null;
+}
+
+async function pollNowPlaying() {
+  if (!selectedId || !isPlaying) return;
+  try {
+    const r = await fetch(`${API}/stations/${selectedId}/now-playing`);
+    const np = await r.json();
+
+    // Update track info if changed
+    const tid = np.current?.id ?? null;
+    if (tid !== lastTrackId) {
+      lastTrackId = tid;
+      renderTrackInfo(np);
     }
-  }, 250);
 
-  // 4. Retry on first user gesture — iOS requires interaction first
-  document.addEventListener('touchstart', () => loadVoices(), { once: true });
-  document.addEventListener('click',      () => loadVoices(), { once: true });
+    // Always update elapsed / live chip
+    updateElapsed(np.elapsed_seconds, np.current?.duration_ticks);
+  } catch {}
 }
 
-function _voicePanelFallback() {
-  document.getElementById('browserVoiceSection').style.display = 'none';
-  document.getElementById('serverVoiceSection').style.display = '';
-  loadServerVoices();
+function renderTrackInfo(np) {
+  const card = document.getElementById('trackCard');
+  if (!card) return;
+
+  const t = np.current;
+  if (!t) { card.innerHTML = '<p class="empty">Waiting for broadcast…</p>'; return; }
+
+  card.innerHTML = `
+    <div class="track-title">${esc(t.name)}</div>
+    <div class="track-artist">${esc(t.artist)}</div>
+    ${t.album ? `<div class="track-album">${esc(t.album)}</div>` : ''}
+    <div class="elapsed-row">
+      <span id="elapsedTime">0:00</span>
+      <div class="elapsed-bar-wrap"><div class="elapsed-bar" id="elapsedBar" style="width:0%"></div></div>
+      <span id="durationTime">${t.duration_ticks ? fmt(t.duration_ticks / 10_000_000) : '--:--'}</span>
+    </div>
+    ${np.next ? `<div class="track-next">Up next: <strong>${esc(np.next.name)}</strong> by ${esc(np.next.artist)}</div>` : ''}
+  `;
 }
 
-// ── Server-side voice picker (Piper + espeak) ────────────────────────────────
+function updateElapsed(elapsedSec, durationTicks) {
+  const el = document.getElementById('elapsedTime');
+  const bar = document.getElementById('elapsedBar');
+  if (!el || elapsedSec == null) return;
+  el.textContent = fmt(elapsedSec);
+  if (bar && durationTicks) {
+    const pct = Math.min(100, (elapsedSec / (durationTicks / 10_000_000)) * 100);
+    bar.style.width = pct + '%';
+  }
+}
+
+// ── Now Playing UI ────────────────────────────────────────────────────────────
+async function renderNowPlaying() {
+  if (!selectedId) return;
+  const [npRes, stRes] = await Promise.all([
+    fetch(`${API}/stations/${selectedId}/now-playing`),
+    fetch(`${API}/stations/${selectedId}`),
+  ]);
+  const np      = await npRes.json();
+  const station = await stRes.json();
+  const panel   = document.getElementById('nowPlayingPanel');
+
+  const t = np.current;
+  const trackCardHtml = t ? `
+    <div class="track-title">${esc(t.name)}</div>
+    <div class="track-artist">${esc(t.artist)}</div>
+    ${t.album ? `<div class="track-album">${esc(t.album)}</div>` : ''}
+    <div class="elapsed-row">
+      <span id="elapsedTime">0:00</span>
+      <div class="elapsed-bar-wrap"><div class="elapsed-bar" id="elapsedBar" style="width:0%"></div></div>
+      <span id="durationTime">${t.duration_ticks ? fmt(t.duration_ticks / 10_000_000) : '--:--'}</span>
+    </div>
+    ${np.next ? `<div class="track-next">Up next: <strong>${esc(np.next.name)}</strong> by ${esc(np.next.artist)}</div>` : ''}
+  ` : '<p class="empty">Hit Play to start the broadcast.</p>';
+
+  panel.innerHTML = `
+    <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <strong>${esc(station.name)}</strong>
+      <span class="station-meta">${esc(station.genre)}</span>
+      ${isPlaying ? '<span class="live-chip"><span class="live-dot"></span>LIVE</span>' : ''}
+      <button class="btn btn-danger" style="margin-left:auto;padding:4px 10px;font-size:0.75rem" onclick="deleteStation('${selectedId}')">Delete</button>
+    </div>
+
+    <div class="now-playing-card" id="trackCard">
+      ${trackCardHtml}
+    </div>
+
+    <div class="volume-row">
+      🔊 <input type="range" min="0" max="1" step="0.05" value="${audio.volume}"
+           oninput="audio.volume=this.value" title="Volume">
+    </div>
+
+    <div class="transport">
+      <button class="btn btn-primary" onclick="togglePlay()">${isPlaying ? '⏹ Stop' : '▶ Play'}</button>
+      <button class="btn btn-ghost" onclick="skip()" ${!isPlaying ? 'disabled' : ''}>⏭ Skip</button>
+      <button class="btn btn-ghost" onclick="refill()" title="Re-fetch tracks from Jellyfin">⟳ Refill</button>
+    </div>
+  `;
+
+  if (isPlaying && np.elapsed_seconds != null) {
+    updateElapsed(np.elapsed_seconds, np.current?.duration_ticks);
+  }
+}
+
+// ── Server voice picker ───────────────────────────────────────────────────────
 async function loadServerVoices() {
   try {
-    const r = await fetch(`${API}/tts/voices`);
+    const r    = await fetch(`${API}/tts/voices`);
     const data = await r.json();
-    const sel = document.getElementById('espeakSelect');
+    const sel  = document.getElementById('voiceSelect');
     const saved = localStorage.getItem('jellyfm-server-voice') || '';
 
-    // Group into Piper and espeak optgroups when both present
-    const piperVoices  = data.voices.filter(v => v.engine === 'piper');
-    const espeakVoices = data.voices.filter(v => v.engine === 'espeak');
+    const piper  = data.voices.filter(v => v.engine === 'piper');
+    const espeak = data.voices.filter(v => v.engine === 'espeak');
 
     let html = '';
-    if (piperVoices.length) {
+    if (piper.length) {
       html += `<optgroup label="Piper (Neural)">`;
-      html += piperVoices.map(v =>
-        `<option value="${esc(v.id)}" ${v.id === saved ? 'selected' : ''}>${esc(v.label)}</option>`
-      ).join('');
+      html += piper.map(v => `<option value="${esc(v.id)}" ${v.id === saved ? 'selected' : ''}>${esc(v.label)}</option>`).join('');
       html += `</optgroup>`;
     }
-    if (espeakVoices.length) {
+    if (espeak.length) {
       html += `<optgroup label="espeak (Fallback)">`;
-      html += espeakVoices.map(v =>
-        `<option value="${esc(v.id)}" ${v.id === saved ? 'selected' : ''}>${esc(v.label)}</option>`
-      ).join('');
+      html += espeak.map(v => `<option value="${esc(v.id)}" ${v.id === saved ? 'selected' : ''}>${esc(v.label)}</option>`).join('');
       html += `</optgroup>`;
     }
-    if (!html) html = `<option value="">No server TTS available — install espeak-ng or Piper</option>`;
+    if (!html) html = `<option value="">No server TTS — install espeak-ng or Piper</option>`;
     sel.innerHTML = html;
 
-    // Auto-select saved or first option
     if (!saved && sel.options.length) {
       sel.selectedIndex = 0;
       await setServerVoice();
@@ -578,7 +560,7 @@ async function loadServerVoices() {
 }
 
 async function setServerVoice() {
-  const id = document.getElementById('espeakSelect').value;
+  const id = document.getElementById('voiceSelect').value;
   if (!id) return;
   localStorage.setItem('jellyfm-server-voice', id);
   await fetch(`${API}/tts/voice`, {
@@ -588,10 +570,7 @@ async function setServerVoice() {
   });
 }
 
-// Keep old name as alias so existing onclick= still works
-const setEspeakVoice = setServerVoice;
-
-async function previewEspeakVoice() {
+async function previewVoice() {
   await setServerVoice();
   if (!selectedId) { toast('Select a station first to preview', true); return; }
   try {
@@ -599,145 +578,21 @@ async function previewEspeakVoice() {
     if (r.ok && r.status !== 204) {
       const blob = await r.blob();
       const url  = URL.createObjectURL(blob);
-      const a = new Audio(url);
+      const a    = new Audio(url);
       a.onended = () => URL.revokeObjectURL(url);
       a.play();
     } else {
-      toast('espeak-ng not installed on the server', true);
+      toast('No TTS engine available on server', true);
     }
   } catch (e) { toast(e.message, true); }
 }
 
-// ── TTS via Web Speech API ────────────────────────────────────────────────────
-const BANTER = {
-  rock:       ["Buckle up — serious riff energy.", "Nothing fixes a bad day like a power chord.", "Turn it up. Your neighbours have headphones."],
-  jazz:       ["Close your eyes. You're in a smoky club. It's 1957.", "Jazz: musicians having more fun than you.", "This one swings hard."],
-  classical:  ["No words needed. Just listen.", "Centuries old and still hits different.", "Clear your mind. Full attention."],
-  pop:        ["You'll be humming this all week.", "Infectious hooks incoming.", "Straight to the chorus. No patience required."],
-  'hip-hop':  ["Bars. Straight bars.", "This beat alone is worth it.", "Lyricism and rhythm in perfect balance."],
-  electronic: ["Four on the floor. Let's go.", "Your brain on synthesisers.", "Built in a laptop and it still slaps."],
-  metal:      ["Volume up. Way up.", "This is foreground music.", "The guitars are angry. That's a feature."],
-};
-const GENERIC = ["Here's one that deserves your full attention.", "A track that holds up every time.", "Sit back. Let it play.", "Coming up — no skipping allowed."];
-
-function getBanter(genre) {
-  const pool = genre ? (BANTER[genre.toLowerCase()] || GENERIC) : GENERIC;
-  return pool[Math.floor(Math.random() * pool.length)];
-}
-
-// Returns a promise that resolves when the announcement finishes playing.
-async function announce(stationId, current, next) {
-  if (browserTTSAvailable && voices.length) {
-    // Path A: browser Web Speech API
-    await new Promise(resolve => {
-      window.speechSynthesis.cancel();
-      const banter = getBanter(current.genre);
-      const name   = current.tts_name   || current.name;
-      const artist = current.tts_artist || current.artist;
-      let text = `${banter}  Coming up: ${name} by ${artist}.`;
-      if (next) {
-        text += `  And after that: ${next.tts_name || next.name} by ${next.tts_artist || next.artist}.`;
-      }
-      const utt = new SpeechSynthesisUtterance(text);
-      utt.voice = getSelectedVoice();
-      utt.rate = 1.05;
-      utt.volume = 0.9;
-      utt.onend = resolve;
-      utt.onerror = resolve;  // don't block music if TTS errors
-      window.speechSynthesis.speak(utt);
-    });
-  } else {
-    // Path B: server-side espeak — fetch WAV and play it
-    try {
-      const r = await fetch(`${API}/stations/${stationId}/announce`);
-      if (r.ok && r.status !== 204) {
-        const blob = await r.blob();
-        const url  = URL.createObjectURL(blob);
-        await new Promise(resolve => {
-          const a = new Audio(url);
-          a.onended = resolve;
-          a.onerror = resolve;
-          a.play().catch(resolve);
-        });
-        URL.revokeObjectURL(url);
-      }
-    } catch { /* skip announcement on error */ }
-  }
-}
-
-// ── Now Playing UI ────────────────────────────────────────────────────────────
-async function fetchNowPlaying() {
-  if (!selectedId) return null;
-  try {
-    const r = await fetch(`${API}/stations/${selectedId}/now-playing`);
-    return await r.json();
-  } catch { return null; }
-}
-
-async function renderNowPlaying() {
-  if (!selectedId) return;
-  const [np, stRes] = await Promise.all([
-    fetchNowPlaying(),
-    fetch(`${API}/stations/${selectedId}`),
-  ]);
-  const station = await stRes.json();
-  const panel = document.getElementById('nowPlayingPanel');
-
-  const playPauseLabel = isPlaying ? '⏸ Pause' : '▶ Play';
-  const playPauseAction = isPlaying ? 'pause()' : 'play()';
-
-  const trackHtml = np?.current ? `
-    <div class="now-playing-card">
-      <div class="track-title">${esc(np.current.name)}</div>
-      <div class="track-artist">${esc(np.current.artist)}</div>
-      ${np.current.album ? `<div class="track-album">${esc(np.current.album)}</div>` : ''}
-      <div class="progress-wrap">
-        <progress id="prog" value="0" max="100"></progress>
-        <span class="time" id="timeEl">0:00</span>
-      </div>
-      ${np.next ? `<div class="track-next">Up next: <strong>${esc(np.next.name)}</strong> by ${esc(np.next.artist)}</div>` : ''}
-    </div>
-  ` : `<div class="now-playing-card"><p class="empty">Hit Play to start.</p></div>`;
-
-  panel.innerHTML = `
-    <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px">
-      <strong>${esc(station.name)}</strong>
-      <span class="station-meta">${esc(station.genre)}</span>
-      <button class="btn btn-danger" style="margin-left:auto;padding:4px 10px;font-size:0.75rem" onclick="deleteStation('${selectedId}')">Delete</button>
-    </div>
-
-    ${trackHtml}
-
-    <div class="volume-row">
-      🔊 <input type="range" min="0" max="1" step="0.05" value="${audio.volume}"
-           oninput="audio.volume=this.value" title="Volume">
-    </div>
-
-    <div class="transport">
-      <button class="btn btn-ghost" onclick="previousTrack()">⏮</button>
-      <button class="btn btn-primary" onclick="${playPauseAction}">${playPauseLabel}</button>
-      <button class="btn btn-ghost" onclick="skipTrack()">⏭ Skip</button>
-      <button class="btn btn-ghost" onclick="refill()" title="Re-fetch tracks from Jellyfin">⟳ Refill</button>
-    </div>
-  `;
-}
-
-function updateProgress() {
-  const prog = document.getElementById('prog');
-  const timeEl = document.getElementById('timeEl');
-  if (!prog || !audio.duration) return;
-  prog.value = (audio.currentTime / audio.duration) * 100;
-  timeEl.textContent = fmt(audio.currentTime);
-}
-
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function fmt(s) {
-  const m = Math.floor(s / 60);
+  const m   = Math.floor(s / 60);
   const sec = Math.floor(s % 60).toString().padStart(2, '0');
   return `${m}:${sec}`;
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
