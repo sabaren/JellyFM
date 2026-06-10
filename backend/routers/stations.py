@@ -163,39 +163,3 @@ def now_playing(station_id: str):
         elapsed_seconds=playback_service.get_elapsed(station_id),
         is_live=playback_service.is_running(station_id),
     )
-
-# ------------------------------------------------------------------
-# Server-side TTS announcement preview
-# ------------------------------------------------------------------
-
-@router.get("/{station_id}/announce")
-async def announce(station_id: str):
-    # Inline imports to prevent potential circular import conflicts
-    from ..services import tts_manager
-    from ..services.banter import get_banter
-
-    station = station_manager.get_station(station_id)
-    if not station:
-        raise HTTPException(status_code=404, detail="Station not found")
-    if not tts_manager.is_available():
-        return Response(status_code=204)
-
-    current = station.current_track
-    if not current:
-        return Response(status_code=204)
-
-    banter = get_banter(current.genre)
-    name   = current.tts_name   or current.name
-    artist = current.tts_artist or current.artist
-    text   = f"{banter}  Coming up: {name} by {artist}."
-
-    nxt = station.next_track
-    if nxt:
-        n_name   = nxt.tts_name   or nxt.name
-        n_artist = nxt.tts_artist or nxt.artist
-        text += f"  And after that: {n_name} by {n_artist}."
-
-    wav = await tts_manager.synthesize(text)
-    if not wav:
-        return Response(status_code=204)
-    return Response(content=wav, media_type="audio/wav")
