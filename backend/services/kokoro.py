@@ -96,7 +96,7 @@ async def synthesize(text: str) -> Optional[bytes]:
 
         return await asyncio.wait_for(
             loop.run_in_executor(None, _run),
-            timeout=30.0,
+            timeout=60.0,
         )
     except asyncio.TimeoutError:
         logger.warning("Kokoro TTS timed out for: %r", text[:60])
