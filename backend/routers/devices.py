@@ -10,16 +10,18 @@ router = APIRouter(tags=["devices"])
 def list_tts_voices():
     """
     Returns available server-side TTS voices.
-    Kokoro neural voices are listed first when present; espeak presets follow.
+    Kokoro neural voices (base + blends) are listed first under engine="piper"
+    so the frontend's existing optgroup filter continues to work.
+    espeak presets follow as fallback.
     """
     engine = tts_manager.best_engine()
     voices = []
 
     for v in kokoro.list_voices():
         voices.append({
-            "id":     f"kokoro:{v['id']}",
+            "id":     f"piper:{v['id']}",   # "piper:" prefix for legacy filter
             "label":  v["label"],
-            "engine": "kokoro",
+            "engine": "piper",              # matches frontend v.engine === 'piper'
             "active": engine == "kokoro",
         })
 
@@ -33,20 +35,26 @@ def list_tts_voices():
 
     return {
         "engine":           engine,
-        "kokoro_available": kokoro.is_available(),
+        "piper_available":  kokoro.is_available(),   # legacy key name
         "espeak_available": espeak.is_available(),
         "voices":           voices,
     }
 
 
 class SetVoiceRequest(BaseModel):
-    voice_id: str  # "kokoro:af_bella" or "espeak:male-us"
+    voice_id: str  # "piper:af_bella", "piper:blend_smooth_host", or "espeak:male-us"
 
 
 @router.put("/tts/voice", status_code=204)
 def set_tts_voice(body: SetVoiceRequest):
     vid = body.voice_id
-    if vid.startswith("kokoro:"):
+    if vid.startswith("piper:"):
+        # "piper:" is our compatibility prefix — routes to Kokoro underneath
+        voice_id = vid.removeprefix("piper:")
+        if not kokoro.set_voice(voice_id):
+            raise HTTPException(400, detail=f"Unknown voice: {voice_id!r}")
+    elif vid.startswith("kokoro:"):
+        # Direct kokoro: prefix also accepted
         voice_id = vid.removeprefix("kokoro:")
         if not kokoro.set_voice(voice_id):
             raise HTTPException(400, detail=f"Unknown Kokoro voice: {voice_id!r}")
@@ -55,4 +63,6 @@ def set_tts_voice(body: SetVoiceRequest):
         if not espeak.set_voice(preset):
             raise HTTPException(400, detail=f"Unknown espeak preset: {preset!r}")
     else:
-        raise HTTPException(400, detail="voice_id must start with 'kokoro:' or 'espeak:'")
+        raise HTTPException(
+            400, detail="voice_id must start with 'piper:', 'kokoro:', or 'espeak:'"
+        )
