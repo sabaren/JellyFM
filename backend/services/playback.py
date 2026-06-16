@@ -1,33 +1,40 @@
 """
 Server-side broadcast engine for JellyFM.
 
-Architecture per station
+Architecture per station (always-on, headless)
 ─────────────────────────────────────────────────────────────────────
-  BroadcastWorker (asyncio.Task)
+  BroadcastWorker (asyncio.Task, started at server boot)
       │
       ├─ _tts_for_track()  →  Kokoro WAV bytes
-      │       │
-      │       └─ _pipe_wav()  →  ffmpeg decoder (WAV→PCM)  ─┐
-      │                                                       ├─► encoder stdin
-      └─ _pipe_url()        →  ffmpeg decoder (URL→PCM)   ─┘
-                                                               │
-                                             ffmpeg encoder (PCM→256kbps MP3)
-                                                               │
-                                             _reader_task reads stdout
-                                                               │
-                                             broadcast to subscriber Queue list
-                                                               │
-                                          HTTP clients via subscribe()
+      │       └─ _pipe_wav()  →  ffmpeg WAV decoder (WAV→PCM) ─┐
+      │                                                          ├─► encoder stdin
+      └─ _pipe_url()        →  ffmpeg URL decoder (URL→PCM)  ─┘
+                                                                  │
+                                              ffmpeg encoder (PCM → 256 kbps MP3)
+                                                                  │
+                                              _reader_task  reads MP3 chunks
+                                                                  │
+                                              broadcast to per-client asyncio.Queue
+                                                                  │
+                                           HTTP clients via subscribe()
 ─────────────────────────────────────────────────────────────────────
 
-Skip: sets skip_event → decoder is killed → worker advances queue by exactly
-one track.
+Error recovery (encoder crash guard)
+─────────────────────────────────────
+If the long-lived ffmpeg encoder exits unexpectedly (BrokenPipeError,
+ConnectionResetError, or any other crash), _encoder_dead() detects it.
+The loop does NOT advance the queue. Instead:
+  1. It sleeps for a short back-off (1 s × consecutive_errors, max 30 s)
+  2. _ensure_encoder() starts a fresh encoder + reader_task
+  3. The same track replays from the start
 
-Encoder crash guard: if the long-lived ffmpeg encoder exits unexpectedly
-(BrokenPipeError etc.), _encoder_dead() detects this and _ensure_encoder()
-restarts a fresh encoder process WITHOUT advancing the queue.  This prevents
-the runaway song-cycling bug where encoder crashes were previously mistaken
-for completed tracks.
+This prevents the runaway song-cycling bug where a dead encoder was
+previously mistaken for a completed/skipped track.
+
+Skip isolation
+──────────────
+POST /skip sets p.skip_event only.  The loop detects it, clears it,
+and advances exactly ONE track — no restarts, no crash path.
 """
 
 import asyncio
@@ -50,11 +57,14 @@ _BITRATE  = "256k"
 _CHUNK    = 8192
 _Q_MAX    = 256
 
+# Back-off constants for encoder crash recovery
+_BACKOFF_BASE = 1.0   # seconds per consecutive failure
+_BACKOFF_MAX  = 30.0  # hard ceiling
+
 
 # ── ffmpeg command builders ───────────────────────────────────────────────────
 
 def _enc_cmd() -> list[str]:
-    """Long-lived MP3 encoder: raw PCM stdin → MP3 stdout."""
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-f", _PCM_FMT, "-ar", str(_RATE), "-ac", str(_CHANNELS), "-i", "pipe:0",
@@ -63,7 +73,6 @@ def _enc_cmd() -> list[str]:
 
 
 def _dec_url_cmd(url: str) -> list[str]:
-    """Per-track decoder: Jellyfin URL → raw PCM stdout."""
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-i", url,
@@ -72,7 +81,6 @@ def _dec_url_cmd(url: str) -> list[str]:
 
 
 def _dec_wav_cmd() -> list[str]:
-    """Per-announcement decoder: WAV bytes stdin → raw PCM stdout."""
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-i", "pipe:0",
@@ -92,9 +100,11 @@ class _Player:
         self.task:         Optional[asyncio.Task] = None
         self.reader_task:  Optional[asyncio.Task] = None
         self.track_started_at: Optional[float] = None
+        # Consecutive encoder-crash counter — drives back-off sleep duration
+        self.consecutive_errors: int = 0
 
     def push(self, chunk: bytes) -> None:
-        """Broadcast a chunk to all subscribers; silently drop laggy ones."""
+        """Fan out an MP3 chunk to all connected subscribers."""
         dead = []
         for q in self.subscribers:
             try:
@@ -110,7 +120,7 @@ class _Player:
     def shutdown_subscribers(self) -> None:
         for q in self.subscribers:
             try:
-                q.put_nowait(None)   # sentinel → subscriber generator exits
+                q.put_nowait(None)   # sentinel — subscriber generator exits
             except Exception:
                 pass
         self.subscribers.clear()
@@ -126,6 +136,8 @@ class PlaybackService:
     # ── Public controls ───────────────────────────────────────────────────────
 
     async def start(self, station_id: str) -> None:
+        """Start the always-on background broadcast for *station_id*.
+        No-op if the worker is already running."""
         if station_id in self._players:
             return
         p = _Player(station_id)
@@ -137,6 +149,8 @@ class PlaybackService:
         p.task.add_done_callback(lambda t: self._on_done(station_id, t))
 
     async def stop(self, station_id: str) -> None:
+        """Stop the broadcast and tear down the encoder.
+        Called only on station deletion or server shutdown."""
         p = self._players.pop(station_id, None)
         if not p:
             return
@@ -155,6 +169,8 @@ class PlaybackService:
         p.shutdown_subscribers()
 
     def skip(self, station_id: str) -> None:
+        """Signal the broadcast worker to advance one track.
+        Never restarts or crashes the encoder."""
         p = self._players.get(station_id)
         if p:
             p.skip_event.set()
@@ -169,7 +185,8 @@ class PlaybackService:
         return None
 
     async def subscribe(self, station_id: str) -> AsyncGenerator[bytes, None]:
-        """Yield live MP3 chunks. Attaches to the running broadcast; disconnects cleanly."""
+        """Attach a new HTTP client to the live broadcast stream.
+        Connecting and disconnecting never affects the background worker."""
         p = self._players.get(station_id)
         if not p:
             return
@@ -194,28 +211,38 @@ class PlaybackService:
             except ValueError:
                 pass
 
-    # ── Encoder lifecycle helpers ─────────────────────────────────────────────
+    # ── Encoder lifecycle ─────────────────────────────────────────────────────
 
     def _encoder_dead(self, p: _Player) -> bool:
-        """True if the encoder process has exited or never been started."""
         return p.encoder_proc is None or p.encoder_proc.returncode is not None
 
     async def _ensure_encoder(self, p: _Player, sid: str) -> bool:
-        """
-        (Re)start the encoder if it has died.  Cancels the stale reader task
-        and spawns a fresh one.  Returns False only when ffmpeg is missing
-        (unrecoverable).
-        """
+        """Start (or restart) the encoder if it has exited.
+        Applies a back-off sleep proportional to consecutive_errors before
+        restarting to prevent tight crash loops.
+        Returns False only if ffmpeg is not installed (unrecoverable)."""
         if not self._encoder_dead(p):
             return True
 
-        # Cancel stale reader before starting a new encoder
+        # Cancel stale reader task before spawning a new encoder
         if p.reader_task and not p.reader_task.done():
             p.reader_task.cancel()
             try:
                 await p.reader_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+        # Progressive back-off: 1 s, 2 s, 3 s … capped at 30 s
+        if p.consecutive_errors > 0:
+            backoff = min(_BACKOFF_BASE * p.consecutive_errors, _BACKOFF_MAX)
+            logger.info(
+                "[%s] Encoder restart back-off %.1f s (error streak: %d)",
+                sid, backoff, p.consecutive_errors,
+            )
+            await asyncio.sleep(backoff)
+
+        if p.stop_event.is_set():
+            return False  # station was deleted during back-off sleep
 
         logger.info("[%s] (Re)starting encoder", sid)
         try:
@@ -237,7 +264,6 @@ class PlaybackService:
     # ── Reader task ───────────────────────────────────────────────────────────
 
     async def _reader_loop(self, p: _Player) -> None:
-        """Read encoded MP3 from the encoder and broadcast to all subscribers."""
         while not p.stop_event.is_set():
             try:
                 chunk = await asyncio.wait_for(
@@ -254,7 +280,8 @@ class PlaybackService:
     # ── PCM pipe helpers ──────────────────────────────────────────────────────
 
     async def _pipe_wav(self, wav: bytes, enc_in: asyncio.StreamWriter, p: _Player) -> bool:
-        """Decode WAV announcement to PCM and feed encoder. Returns False if interrupted."""
+        """Decode WAV announcement → PCM → encoder stdin.
+        Returns False if interrupted by skip/stop or a pipe error."""
         proc = await asyncio.create_subprocess_exec(
             *_dec_wav_cmd(),
             stdin=asyncio.subprocess.PIPE,
@@ -278,8 +305,8 @@ class PlaybackService:
         return True
 
     async def _pipe_url(self, url: str, enc_in: asyncio.StreamWriter, p: _Player) -> bool:
-        """Decode audio from Jellyfin URL to PCM and feed encoder.
-        Returns True only when the track finished naturally."""
+        """Decode audio from Jellyfin URL → PCM → encoder stdin.
+        Returns True only when the track finishes naturally (EOF from decoder)."""
         proc = await asyncio.create_subprocess_exec(
             *_dec_url_cmd(url),
             stdout=asyncio.subprocess.PIPE,
@@ -311,7 +338,7 @@ class PlaybackService:
             await proc.wait()
         return completed
 
-    # ── TTS generation ────────────────────────────────────────────────────────
+    # ── TTS ───────────────────────────────────────────────────────────────────
 
     async def _tts_for_track(self, track, next_track=None) -> Optional[bytes]:
         banter = get_banter(track.genre)
@@ -326,7 +353,7 @@ class PlaybackService:
 
     # ── Main broadcast loop ───────────────────────────────────────────────────
 
-    async def _broadcast_loop(self, p: _Player) -> None:
+    async def _broadcast_loop(self, p: _Player) -> None:  # noqa: C901
         sid = p.station_id
         logger.info("Broadcast starting — station %s", sid)
 
@@ -334,15 +361,17 @@ class PlaybackService:
 
         while not p.stop_event.is_set():
 
-            # ── Ensure encoder is running (restarts without advancing queue) ──
+            # ── 1. Ensure encoder is alive ────────────────────────────────────
+            # If the encoder crashed, _ensure_encoder sleeps (back-off) and
+            # restarts it.  Queue position does NOT advance on crash.
             if not await self._ensure_encoder(p, sid):
-                break  # ffmpeg missing — unrecoverable
+                break  # ffmpeg missing — nothing we can do
             enc_in = p.encoder_proc.stdin
 
-            # ── Get station & current track ───────────────────────────────────
+            # ── 2. Fetch current track ────────────────────────────────────────
             station = station_manager.get_station(sid)
             if station is None:
-                logger.warning("Station %s disappeared", sid)
+                logger.warning("[%s] Station disappeared", sid)
                 break
 
             track = station.current_track
@@ -352,23 +381,27 @@ class PlaybackService:
                     station = await station_manager.refill_queue(sid)
                     track   = station.current_track
                 except Exception:
-                    logger.exception("Refill failed for %s", sid)
+                    logger.exception("[%s] Refill failed", sid)
                     await asyncio.sleep(5)
                     continue
                 if track is None:
                     await asyncio.sleep(5)
                     continue
 
-            # ── Pipe TTS announcement ─────────────────────────────────────────
+            # ── 3. TTS announcement ───────────────────────────────────────────
             tts = prefetched_tts or await self._tts_for_track(track, station.next_track)
             prefetched_tts = None
 
             if tts and not p.skip_event.is_set():
                 await self._pipe_wav(tts, enc_in, p)
 
-                # Encoder died during TTS → restart next iteration, same track
+                # Encoder crash during TTS → back-off + restart, same track
                 if self._encoder_dead(p):
-                    logger.warning("[%s] Encoder died during TTS — restarting", sid)
+                    p.consecutive_errors += 1
+                    logger.warning(
+                        "[%s] Encoder died during TTS (error #%d) — restarting",
+                        sid, p.consecutive_errors,
+                    )
                     p.skip_event.clear()
                     continue
 
@@ -376,7 +409,7 @@ class PlaybackService:
             if p.stop_event.is_set():
                 break
 
-            # ── Pre-fetch TTS for next track concurrently ─────────────────────
+            # ── 4. Pre-fetch next TTS while this track plays ──────────────────
             next_track   = station.next_track
             prefetch_job = asyncio.create_task(
                 self._tts_for_track(
@@ -386,7 +419,7 @@ class PlaybackService:
                 )
             ) if next_track else None
 
-            # ── Pipe the music track ──────────────────────────────────────────
+            # ── 5. Stream the music track ─────────────────────────────────────
             url = jellyfin.stream_url(track.id)
             logger.info("[%s] ▶ %s — %s", sid, track.artist, track.name)
             p.track_started_at = time.time()
@@ -394,7 +427,7 @@ class PlaybackService:
 
             completed = await self._pipe_url(url, enc_in, p)
 
-            # Collect pre-fetched TTS result
+            # Collect (or cancel) pre-fetched TTS
             if prefetch_job:
                 if completed:
                     try:
@@ -404,22 +437,26 @@ class PlaybackService:
                 else:
                     prefetch_job.cancel()
 
-            # ── Encoder crash guard ───────────────────────────────────────────
-            # If the encoder died during the track (BrokenPipeError etc.),
-            # restart it WITHOUT advancing the queue.  This is the key fix for
-            # the runaway song-cycling bug: previously a dead encoder would
-            # return completed=False, which looked identical to a skip, causing
-            # an infinite advance loop.
+            # ── 6. Encoder crash guard ────────────────────────────────────────
+            # A dead encoder after _pipe_url means a pipe/network failure,
+            # NOT a skip.  Back off and restart WITHOUT advancing the queue.
             if self._encoder_dead(p):
-                logger.warning("[%s] Encoder died during track — restarting", sid)
+                p.consecutive_errors += 1
+                logger.warning(
+                    "[%s] Encoder died during track (error #%d) — restarting same track",
+                    sid, p.consecutive_errors,
+                )
                 p.skip_event.clear()
                 continue
 
+            # ── 7. Clean advance ──────────────────────────────────────────────
+            # Only reached when the encoder is alive AND either:
+            #   (a) track finished naturally (completed=True), or
+            #   (b) user explicitly set skip_event (completed=False, encoder alive)
+            p.consecutive_errors = 0   # successful track — reset error streak
             p.skip_event.clear()
             if p.stop_event.is_set():
                 break
-
-            # Track finished naturally or user explicitly skipped → advance once
             station.advance()
 
         # ── Teardown ──────────────────────────────────────────────────────────
