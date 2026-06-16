@@ -1,11 +1,55 @@
+"""
+JellyFM application entry point.
+
+Lifespan hook: every station persisted to stations.json is started as a
+headless background broadcast worker at server boot.  Stations run 24/7
+regardless of whether any browser client is connected.  New stations
+created via the API are also auto-started immediately.  Workers are only
+stopped when their station is explicitly deleted.
+"""
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
-from .routers import health, genres, stations, devices
 from fastapi.staticfiles import StaticFiles
 import os
 
-app = FastAPI(title="JellyFM", version="0.1.0", description="Self-hosted radio powered by Jellyfin")
+from .routers import health, genres, stations, devices
+from .services.station_manager import station_manager
+from .services.playback import playback_service
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── Startup ───────────────────────────────────────────────────────────────
+    persisted = station_manager.list_stations()
+    if persisted:
+        logger.info("Auto-starting %d persisted station broadcast(s)…", len(persisted))
+        for station in persisted:
+            await playback_service.start(station.id)
+            logger.info("  ▶ %s (%s)", station.name, station.id)
+    else:
+        logger.info("No persisted stations — broadcasts will start when stations are created.")
+
+    yield
+
+    # ── Shutdown ──────────────────────────────────────────────────────────────
+    running = list(station_manager.list_stations())
+    if running:
+        logger.info("Shutting down %d station broadcast(s)…", len(running))
+        for station in running:
+            await playback_service.stop(station.id)
+
+
+app = FastAPI(
+    title="JellyFM",
+    version="0.2.0",
+    description="Self-hosted radio powered by Jellyfin",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
