@@ -9,3 +9,4 @@ pykakasi==2.2.1
 kokoro-onnx
 soundfile
 onnxruntime
+numpy

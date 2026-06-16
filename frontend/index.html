@@ -540,7 +540,7 @@ async function loadServerVoices() {
 
     let html = '';
     if (piper.length) {
-      html += `<optgroup label="Piper (Neural)">`;
+      html += `<optgroup label="Neural TTS (Kokoro)">`;
       html += piper.map(v => `<option value="${esc(v.id)}" ${v.id === saved ? 'selected' : ''}>${esc(v.label)}</option>`).join('');
       html += `</optgroup>`;
     }
