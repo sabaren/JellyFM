@@ -8,17 +8,17 @@
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --bg: #0f0f13;
+    --bg:      #0f0f13;
     --surface: #1a1a22;
-    --surface2: #22222e;
-    --border: #2e2e3e;
-    --accent: #7c6af7;
+    --surface2:#22222e;
+    --border:  #2e2e3e;
+    --accent:  #7c6af7;
     --accent2: #a78bfa;
-    --text: #e2e2f0;
-    --muted: #7070a0;
-    --danger: #f87171;
+    --text:    #e2e2f0;
+    --muted:   #7070a0;
+    --danger:  #f87171;
     --success: #4ade80;
-    --radius: 10px;
+    --radius:  10px;
   }
 
   body {
@@ -108,7 +108,7 @@
     border: 1px solid transparent; transition: all 0.15s;
     margin-bottom: 8px;
   }
-  .station-item:hover { background: var(--surface2); border-color: var(--border); }
+  .station-item:hover  { background: var(--surface2); border-color: var(--border); }
   .station-item.active { background: var(--surface2); border-color: var(--accent); }
   .station-name { font-weight: 600; }
   .station-meta { font-size: 0.78rem; color: var(--muted); }
@@ -120,7 +120,6 @@
   .badge-live { background: #1a3a2a; color: var(--success); }
   .badge-idle { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
 
-  /* Now playing */
   .now-playing-card {
     background: var(--surface2); border-radius: 8px; padding: 20px;
     border: 1px solid var(--border); margin-bottom: 16px;
@@ -135,7 +134,6 @@
   }
   .track-next strong { color: var(--text); }
 
-  /* Elapsed timer */
   .elapsed-row {
     margin-top: 10px;
     display: flex; align-items: center; gap: 10px;
@@ -146,10 +144,9 @@
   }
   .elapsed-bar {
     height: 100%; background: var(--accent); border-radius: 2px;
-    transition: width 1s linear;
+    /* No CSS transition — rAF updates this every frame for smooth motion */
   }
 
-  /* Volume */
   .volume-row {
     display: flex; align-items: center; gap: 10px; margin-top: 12px;
     font-size: 0.8rem; color: var(--muted);
@@ -168,7 +165,7 @@
   }
   .live-dot {
     width: 6px; height: 6px; border-radius: 50%; background: var(--success);
-    animation: pulse 1.5s ease-in-out infinite;
+    animation: livepulse 1.5s ease-in-out infinite;
   }
 
   .empty { color: var(--muted); font-size: 0.875rem; }
@@ -182,10 +179,10 @@
     transition: opacity 0.2s, transform 0.2s;
     pointer-events: none; z-index: 9999;
   }
-  #toast.show     { opacity: 1; transform: translateY(0); }
-  #toast.err      { border-color: var(--danger); color: var(--danger); }
+  #toast.show { opacity: 1; transform: translateY(0); }
+  #toast.err  { border-color: var(--danger); color: var(--danger); }
 
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  @keyframes livepulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 </style>
 </head>
 <body>
@@ -195,12 +192,16 @@
   <div id="statusDot" class="status-dot" title="Server status"></div>
 </header>
 
-<!-- Hidden audio element — attaches to the live server broadcast -->
+<!--
+  Single hidden audio element. It attaches to /{station_id}/stream exactly
+  once when the user presses Play. The server broadcast runs headlessly 24/7;
+  this element is purely a passive listener. It never drives track changes.
+-->
 <audio id="player" preload="none"></audio>
 
 <main>
-  <!-- Left: create + list + voice picker -->
   <div>
+    <!-- Create station -->
     <div class="panel" style="margin-bottom:16px">
       <div class="panel-header">New Station</div>
       <div class="panel-body">
@@ -222,6 +223,7 @@
       </div>
     </div>
 
+    <!-- Voice picker -->
     <div class="panel" style="margin-bottom:16px">
       <div class="panel-header">Announcer Voice</div>
       <div class="panel-body">
@@ -231,10 +233,12 @@
             <option value="">— loading —</option>
           </select>
         </div>
-        <button class="btn btn-ghost" style="font-size:0.8rem;padding:5px 10px" onclick="previewVoice()">Preview voice</button>
+        <button class="btn btn-ghost" style="font-size:0.8rem;padding:5px 10px"
+                onclick="previewVoice()">Preview voice</button>
       </div>
     </div>
 
+    <!-- Station list -->
     <div class="panel">
       <div class="panel-header">Stations</div>
       <div class="panel-body" id="stationList">
@@ -243,12 +247,12 @@
     </div>
   </div>
 
-  <!-- Right: now playing -->
+  <!-- Now Playing panel -->
   <div>
     <div class="panel">
       <div class="panel-header">Now Playing</div>
       <div class="panel-body" id="nowPlayingPanel">
-        <p class="empty">Create a station and hit Play.</p>
+        <p class="empty">Select a station and press Play.</p>
       </div>
     </div>
   </div>
@@ -257,35 +261,91 @@
 <div id="toast"></div>
 
 <script>
+// ═══════════════════════════════════════════════════════════════════════════════
+//  JellyFM frontend — pure passive live-stream receiver
+//
+//  Design contract:
+//    • The server runs a headless broadcast loop 24/7 per station.
+//    • The <audio> element attaches to /{id}/stream exactly once on Play.
+//      Every track transition and TTS announcement happens on the server.
+//      The browser never advances, retries, or resets tracks on its own.
+//    • Progress bar and track metadata are driven entirely by polling
+//      /{id}/now-playing every 2 seconds.  Between polls, requestAnimationFrame
+//      interpolates the elapsed position so the bar moves smoothly at 60 fps.
+//    • Skip sends POST /{id}/skip and nothing else — the server flushes the
+//      current decoder and all connected clients hear the change simultaneously.
+// ═══════════════════════════════════════════════════════════════════════════════
+
 const API   = '';
 const audio = document.getElementById('player');
 
-let selectedId   = null;
-let isPlaying    = false;
-let pollInterval = null;
-let lastTrackId  = null;   // detect track changes in poll
+// ── UI / playback state ───────────────────────────────────────────────────────
+let selectedId = null;   // currently selected station ID
+let isPlaying  = false;  // whether this browser tab is connected to the stream
 
-// ── Bootstrap ─────────────────────────────────────────────────────────────────
+// ── Poll state (drives progress bar interpolation) ────────────────────────────
+let pollInterval      = null;
+let lastTrackId       = null;   // last track ID seen from server
+let lastPollElapsed   = null;   // elapsed_seconds from the most recent poll response
+let lastPollTimestamp = null;   // performance.now() at the moment that poll arrived
+let lastDurationSec   = null;   // track.duration_ticks / 10_000_000 from last poll
+
+// ── Stream error handling ─────────────────────────────────────────────────────
+let streamRetries = 0;
+const MAX_STREAM_RETRIES = 3;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  BOOT
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function init() {
+  // Wire up the audio element error handler ONCE.
+  // This is the ONLY audio event we listen to.
+  // We never listen to 'ended' — the server handles all track transitions.
+  audio.addEventListener('error', onStreamError);
+
+  // Start the 60 fps progress-bar interpolation loop immediately.
+  // It only draws when the station is live and poll data is available.
+  requestAnimationFrame(progressFrame);
+
   await Promise.all([checkHealth(), loadGenres(), loadServerVoices()]);
   await loadStations();
-
-  audio.addEventListener('error', (e) => {
-    console.error('Stream error', e);
-    toast('Stream error — reconnecting…', true);
-    // Brief delay then re-attach to keep the stream alive
-    setTimeout(() => {
-      if (isPlaying && selectedId) {
-        attachStream(selectedId);
-      }
-    }, 3000);
-  });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  STREAM ERROR HANDLING
+//  A genuine network dropout should attempt to reconnect up to MAX_STREAM_RETRIES
+//  times with exponential backoff.  After that, the user must press Play again.
+//  We never advance the track queue from here — that is the server's job.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function onStreamError(e) {
+  if (!isPlaying || !selectedId) return;
+  streamRetries++;
+  if (streamRetries <= MAX_STREAM_RETRIES) {
+    const delay = streamRetries * 2000;   // 2 s, 4 s, 6 s
+    toast(`Stream interrupted — reconnecting in ${delay / 1000}s… (${streamRetries}/${MAX_STREAM_RETRIES})`, true);
+    setTimeout(() => {
+      if (isPlaying && selectedId) attachStream(selectedId);
+    }, delay);
+  } else {
+    toast('Stream unavailable after retries. Press Play to try again.', true);
+    isPlaying = false;
+    streamRetries = 0;
+    stopPolling();
+    redrawTransport();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  HEALTH + GENRE LOADING
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function checkHealth() {
   try {
     const r = await fetch(`${API}/health`);
-    document.getElementById('statusDot').className = r.ok ? 'status-dot ok' : 'status-dot err';
+    document.getElementById('statusDot').className =
+      r.ok ? 'status-dot ok' : 'status-dot err';
   } catch {
     document.getElementById('statusDot').className = 'status-dot err';
   }
@@ -293,19 +353,26 @@ async function checkHealth() {
 
 async function loadGenres() {
   try {
-    const r = await fetch(`${API}/genres`);
+    const r      = await fetch(`${API}/genres`);
     const genres = await r.json();
-    const sel = document.getElementById('newGenre');
+    const sel    = document.getElementById('newGenre');
     sel.innerHTML = genres.length
-      ? genres.map(g => `<option value="${esc(g.name)}">${esc(g.name)}${g.track_count ? ` (${g.track_count})` : ''}</option>`).join('')
+      ? genres.map(g =>
+          `<option value="${esc(g.name)}">${esc(g.name)}${g.track_count ? ` (${g.track_count})` : ''}</option>`
+        ).join('')
       : '<option value="">No genres found</option>';
-  } catch { toast('Could not reach server', true); }
+  } catch {
+    toast('Could not reach server', true);
+  }
 }
 
-// ── Stations ──────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  STATION LIST
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function loadStations() {
   try {
-    const r = await fetch(`${API}/stations`);
+    const r        = await fetch(`${API}/stations`);
     const stations = await r.json();
     renderStationList(stations);
   } catch {}
@@ -313,11 +380,15 @@ async function loadStations() {
 
 function renderStationList(stations) {
   const el = document.getElementById('stationList');
-  if (!stations.length) { el.innerHTML = '<p class="empty">No stations yet.</p>'; return; }
+  if (!stations.length) {
+    el.innerHTML = '<p class="empty">No stations yet.</p>';
+    return;
+  }
   el.innerHTML = stations.map(s => {
-    const live = (s.id === selectedId && isPlaying);
+    const live = s.id === selectedId && isPlaying;
     return `
-      <div class="station-item ${s.id === selectedId ? 'active' : ''}" onclick="selectStation('${s.id}')">
+      <div class="station-item ${s.id === selectedId ? 'active' : ''}"
+           onclick="selectStation('${s.id}')">
         <div style="display:flex;align-items:center;gap:8px">
           <span class="station-name">${esc(s.name)}</span>
           <span class="badge ${live ? 'badge-live' : 'badge-idle'}">${live ? '● LIVE' : 'idle'}</span>
@@ -336,9 +407,9 @@ async function createStation() {
   btn.disabled = true;
   try {
     const r = await fetch(`${API}/stations`, {
-      method: 'POST',
+      method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, genre, shuffle }),
+      body:    JSON.stringify({ name, genre, shuffle }),
     });
     if (!r.ok) throw new Error((await r.json()).detail);
     const station = await r.json();
@@ -346,35 +417,64 @@ async function createStation() {
     toast(`Station "${station.name}" created`);
     await loadStations();
     selectStation(station.id);
-  } catch (e) { toast(e.message, true); }
-  finally { btn.disabled = false; }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function selectStation(id) {
-  if (selectedId && selectedId !== id) stopStream();
+  // Switching stations: disconnect the old stream but leave the server running.
+  if (selectedId && selectedId !== id && isPlaying) {
+    detachStream();
+  }
   selectedId = id;
-  await loadStations();
-  await renderNowPlaying();
+  lastTrackId = null;    // force a full track card re-render on next poll
+  await loadStations();  // refresh badge states
+  await renderNowPlayingPanel();
 }
 
 async function deleteStation(id) {
   if (!confirm('Delete this station?')) return;
   if (selectedId === id) {
-    stopStream();
+    detachStream();
     selectedId = null;
-    document.getElementById('nowPlayingPanel').innerHTML = '<p class="empty">Create a station and hit Play.</p>';
+    document.getElementById('nowPlayingPanel').innerHTML =
+      '<p class="empty">Select a station and press Play.</p>';
   }
   await fetch(`${API}/stations/${id}`, { method: 'DELETE' });
   await loadStations();
 }
 
-// ── Stream controls ───────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  STREAM ATTACH / DETACH
+//  attachStream sets src exactly once; the browser joins the live broadcast.
+//  detachStream removes the browser from the stream without touching the server.
+// ─────────────────────────────────────────────────────────────────────────────
+
 function attachStream(id) {
-  // Re-attach with a cache-buster so the browser doesn't serve a stale response
-  audio.src = `${API}/stations/${id}/stream?t=${Date.now()}`;
+  streamRetries = 0;
+  // Cache-buster prevents the browser from replaying a stale cached response.
+  audio.src = `${API}/stations/${id}/stream?_=${Date.now()}`;
   audio.load();
-  audio.play().catch(() => toast('Tap screen first, then press Play', true));
+  audio.play().catch(() => toast('Tap the page first, then press Play.', true));
 }
+
+function detachStream() {
+  audio.pause();
+  audio.src  = '';
+  isPlaying  = false;
+  stopPolling();
+  // Reset interpolation state
+  lastPollElapsed   = null;
+  lastPollTimestamp = null;
+  lastDurationSec   = null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PLAY / STOP / SKIP / REFILL
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function play() {
   if (!selectedId) return;
@@ -382,28 +482,24 @@ async function play() {
   isPlaying = true;
   startPolling();
   await loadStations();
-  await renderNowPlaying();
+  redrawTransport();
 }
 
-function stopStream() {
-  audio.pause();
-  audio.src = '';
-  isPlaying = false;
-  stopPolling();
+function stop() {
+  detachStream();
   loadStations();
+  redrawTransport();
 }
 
-async function togglePlay() {
-  if (isPlaying) {
-    stopStream();
-    renderNowPlaying();
-  } else {
-    await play();
-  }
+function togglePlay() {
+  if (isPlaying) stop(); else play();
 }
 
 async function skip() {
-  if (!selectedId) return;
+  if (!selectedId || !isPlaying) return;
+  // POST to the server; the broadcast worker flushes the current decoder,
+  // advances exactly one track, and all connected clients hear the change.
+  // The frontend does nothing except show a toast.
   await fetch(`${API}/stations/${selectedId}/skip`, { method: 'POST' });
   toast('Skipping…');
 }
@@ -414,10 +510,18 @@ async function refill() {
   toast('Queue refilled');
 }
 
-// ── Now-playing poll ──────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  NOW-PLAYING POLL
+//  Runs every 2 seconds while a stream is active.
+//  Only the track card innerHTML is rebuilt when the track ID changes.
+//  The progress bar is never touched here — it is driven by the rAF loop below.
+// ─────────────────────────────────────────────────────────────────────────────
+
 function startPolling() {
   stopPolling();
-  pollInterval = setInterval(pollNowPlaying, 2500);
+  pollInterval = setInterval(pollNowPlaying, 2000);
+  // Immediate first poll
+  pollNowPlaying();
 }
 
 function stopPolling() {
@@ -426,88 +530,116 @@ function stopPolling() {
 }
 
 async function pollNowPlaying() {
-  if (!selectedId || !isPlaying) return;
+  if (!selectedId) return;
+  let np;
   try {
     const r = await fetch(`${API}/stations/${selectedId}/now-playing`);
-    const np = await r.json();
+    np = await r.json();
+  } catch {
+    return;
+  }
 
-    // Update track info if changed
-    const tid = np.current?.id ?? null;
-    if (tid !== lastTrackId) {
-      lastTrackId = tid;
-      renderTrackInfo(np);
-    }
+  // Update interpolation anchors from the server's authoritative values.
+  // elapsed_seconds is how far into the current track the server is right now.
+  if (np.elapsed_seconds != null) {
+    lastPollElapsed   = np.elapsed_seconds;
+    lastPollTimestamp = performance.now();
+  }
+  lastDurationSec = np.current?.duration_ticks
+    ? np.current.duration_ticks / 10_000_000
+    : null;
 
-    // Always update elapsed / live chip
-    updateElapsed(np.elapsed_seconds, np.current?.duration_ticks);
-  } catch {}
-}
+  // Rebuild the track card only when the playing track changes.
+  // This prevents the title/artist/duration from flashing on every poll.
+  const incomingId = np.current?.id ?? null;
+  if (incomingId !== lastTrackId) {
+    lastTrackId = incomingId;
+    renderTrackCard(np);
+  }
 
-function renderTrackInfo(np) {
-  const card = document.getElementById('trackCard');
-  if (!card) return;
-
-  const t = np.current;
-  if (!t) { card.innerHTML = '<p class="empty">Waiting for broadcast…</p>'; return; }
-
-  card.innerHTML = `
-    <div class="track-title">${esc(t.name)}</div>
-    <div class="track-artist">${esc(t.artist)}</div>
-    ${t.album ? `<div class="track-album">${esc(t.album)}</div>` : ''}
-    <div class="elapsed-row">
-      <span id="elapsedTime">0:00</span>
-      <div class="elapsed-bar-wrap"><div class="elapsed-bar" id="elapsedBar" style="width:0%"></div></div>
-      <span id="durationTime">${t.duration_ticks ? fmt(t.duration_ticks / 10_000_000) : '--:--'}</span>
-    </div>
-    ${np.next ? `<div class="track-next">Up next: <strong>${esc(np.next.name)}</strong> by ${esc(np.next.artist)}</div>` : ''}
-  `;
-}
-
-function updateElapsed(elapsedSec, durationTicks) {
-  const el = document.getElementById('elapsedTime');
-  const bar = document.getElementById('elapsedBar');
-  if (!el || elapsedSec == null) return;
-  el.textContent = fmt(elapsedSec);
-  if (bar && durationTicks) {
-    const pct = Math.min(100, (elapsedSec / (durationTicks / 10_000_000)) * 100);
-    bar.style.width = pct + '%';
+  // Sync the "Up next" text in case it changed without a track-ID change.
+  const nextEl = document.getElementById('upNextEl');
+  if (nextEl) {
+    nextEl.textContent = np.next
+      ? `Up next: ${np.next.name} by ${np.next.artist}`
+      : '';
   }
 }
 
-// ── Now Playing UI ────────────────────────────────────────────────────────────
-async function renderNowPlaying() {
+// ─────────────────────────────────────────────────────────────────────────────
+//  60 FPS PROGRESS BAR INTERPOLATION
+//  This loop runs forever in the background.  It reads lastPollElapsed
+//  (anchored to lastPollTimestamp) and extrapolates forward using the wall clock
+//  so the bar moves smoothly at 60 fps without waiting for the next poll.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function progressFrame() {
+  if (isPlaying && lastPollElapsed !== null && lastPollTimestamp !== null) {
+    const secondsSincePoll = (performance.now() - lastPollTimestamp) / 1000;
+    const interpolated     = lastPollElapsed + secondsSincePoll;
+
+    const timeEl = document.getElementById('elapsedTime');
+    const barEl  = document.getElementById('elapsedBar');
+
+    if (timeEl) {
+      timeEl.textContent = fmt(interpolated);
+    }
+    if (barEl && lastDurationSec && lastDurationSec > 0) {
+      const pct = Math.min(100, (interpolated / lastDurationSec) * 100);
+      barEl.style.width = pct.toFixed(2) + '%';
+    }
+  }
+  requestAnimationFrame(progressFrame);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  NOW-PLAYING PANEL RENDERING
+//  renderNowPlayingPanel: rebuilds the full right-hand panel shell.
+//    Called when: station is selected, or play/stop state changes.
+//  renderTrackCard: rebuilds only the inner track card.
+//    Called when: the track ID changes (detected by pollNowPlaying).
+//  redrawTransport: updates just the play/stop button label and skip enable state.
+//    Called when: isPlaying changes without a full panel rebuild.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function renderNowPlayingPanel() {
   if (!selectedId) return;
-  const [npRes, stRes] = await Promise.all([
-    fetch(`${API}/stations/${selectedId}/now-playing`),
-    fetch(`${API}/stations/${selectedId}`),
-  ]);
-  const np      = await npRes.json();
-  const station = await stRes.json();
-  const panel   = document.getElementById('nowPlayingPanel');
+  let station, np;
+  try {
+    const [stRes, npRes] = await Promise.all([
+      fetch(`${API}/stations/${selectedId}`),
+      fetch(`${API}/stations/${selectedId}/now-playing`),
+    ]);
+    station = await stRes.json();
+    np      = await npRes.json();
+  } catch {
+    return;
+  }
 
-  const t = np.current;
-  const trackCardHtml = t ? `
-    <div class="track-title">${esc(t.name)}</div>
-    <div class="track-artist">${esc(t.artist)}</div>
-    ${t.album ? `<div class="track-album">${esc(t.album)}</div>` : ''}
-    <div class="elapsed-row">
-      <span id="elapsedTime">0:00</span>
-      <div class="elapsed-bar-wrap"><div class="elapsed-bar" id="elapsedBar" style="width:0%"></div></div>
-      <span id="durationTime">${t.duration_ticks ? fmt(t.duration_ticks / 10_000_000) : '--:--'}</span>
-    </div>
-    ${np.next ? `<div class="track-next">Up next: <strong>${esc(np.next.name)}</strong> by ${esc(np.next.artist)}</div>` : ''}
-  ` : '<p class="empty">Hit Play to start the broadcast.</p>';
+  // Seed interpolation state from this initial fetch.
+  if (np.elapsed_seconds != null) {
+    lastPollElapsed   = np.elapsed_seconds;
+    lastPollTimestamp = performance.now();
+  }
+  lastDurationSec = np.current?.duration_ticks
+    ? np.current.duration_ticks / 10_000_000
+    : null;
 
+  const panel = document.getElementById('nowPlayingPanel');
   panel.innerHTML = `
     <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
       <strong>${esc(station.name)}</strong>
       <span class="station-meta">${esc(station.genre)}</span>
       ${isPlaying ? '<span class="live-chip"><span class="live-dot"></span>LIVE</span>' : ''}
-      <button class="btn btn-danger" style="margin-left:auto;padding:4px 10px;font-size:0.75rem" onclick="deleteStation('${selectedId}')">Delete</button>
+      <button class="btn btn-danger"
+              style="margin-left:auto;padding:4px 10px;font-size:0.75rem"
+              onclick="deleteStation('${selectedId}')">Delete</button>
     </div>
 
     <div class="now-playing-card" id="trackCard">
-      ${trackCardHtml}
+      <p class="empty" id="trackWaiting">
+        ${isPlaying ? 'Waiting for broadcast…' : 'Press Play to connect.'}
+      </p>
     </div>
 
     <div class="volume-row">
@@ -515,19 +647,68 @@ async function renderNowPlaying() {
            oninput="audio.volume=this.value" title="Volume">
     </div>
 
-    <div class="transport">
-      <button class="btn btn-primary" onclick="togglePlay()">${isPlaying ? '⏹ Stop' : '▶ Play'}</button>
-      <button class="btn btn-ghost" onclick="skip()" ${!isPlaying ? 'disabled' : ''}>⏭ Skip</button>
-      <button class="btn btn-ghost" onclick="refill()" title="Re-fetch tracks from Jellyfin">⟳ Refill</button>
+    <div class="transport" id="transport">
+      <button class="btn btn-primary" id="playBtn" onclick="togglePlay()">
+        ${isPlaying ? '⏹ Stop' : '▶ Play'}
+      </button>
+      <button class="btn btn-ghost" id="skipBtn"
+              onclick="skip()" ${!isPlaying ? 'disabled' : ''}>⏭ Skip</button>
+      <button class="btn btn-ghost" onclick="refill()"
+              title="Re-fetch tracks from Jellyfin">⟳ Refill</button>
     </div>
   `;
 
-  if (isPlaying && np.elapsed_seconds != null) {
-    updateElapsed(np.elapsed_seconds, np.current?.duration_ticks);
+  // If a track is already playing, fill the card immediately.
+  if (np.current) {
+    lastTrackId = np.current.id;
+    renderTrackCard(np);
   }
 }
 
-// ── Server voice picker ───────────────────────────────────────────────────────
+function renderTrackCard(np) {
+  const card = document.getElementById('trackCard');
+  if (!card) return;
+
+  const t = np.current;
+  if (!t) {
+    card.innerHTML = '<p class="empty">Waiting for broadcast…</p>';
+    return;
+  }
+
+  // Build the card HTML.  The elapsed/bar elements start at 0:00/0% and are
+  // immediately updated by the rAF loop — no flash because the rAF loop runs
+  // every frame and will correct them before the user can perceive 0:00.
+  card.innerHTML = `
+    <div class="track-title">${esc(t.name)}</div>
+    <div class="track-artist">${esc(t.artist)}</div>
+    ${t.album ? `<div class="track-album">${esc(t.album)}</div>` : ''}
+    <div class="elapsed-row">
+      <span id="elapsedTime">0:00</span>
+      <div class="elapsed-bar-wrap">
+        <div class="elapsed-bar" id="elapsedBar" style="width:0%"></div>
+      </div>
+      <span id="durationTime">${t.duration_ticks ? fmt(t.duration_ticks / 10_000_000) : '--:--'}</span>
+    </div>
+    <div id="upNextEl" class="track-next" style="font-size:0.8rem;color:var(--muted)">
+      ${np.next ? `Up next: <strong>${esc(np.next.name)}</strong> by ${esc(np.next.artist)}` : ''}
+    </div>
+  `;
+}
+
+function redrawTransport() {
+  const playBtn = document.getElementById('playBtn');
+  const skipBtn = document.getElementById('skipBtn');
+  const liveChip = document.querySelector('.live-chip');
+
+  if (playBtn) playBtn.textContent = isPlaying ? '⏹ Stop' : '▶ Play';
+  if (skipBtn) skipBtn.disabled = !isPlaying;
+  if (liveChip) liveChip.style.display = isPlaying ? '' : 'none';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  SERVER VOICE PICKER
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function loadServerVoices() {
   try {
     const r    = await fetch(`${API}/tts/voices`);
@@ -535,21 +716,27 @@ async function loadServerVoices() {
     const sel  = document.getElementById('voiceSelect');
     const saved = localStorage.getItem('jellyfm-server-voice') || '';
 
-    const piper  = data.voices.filter(v => v.engine === 'piper');
-    const espeak = data.voices.filter(v => v.engine === 'espeak');
+    const neural = data.voices.filter(v => v.engine === 'piper');
+    const legacy = data.voices.filter(v => v.engine === 'espeak');
 
     let html = '';
-    if (piper.length) {
+    if (neural.length) {
       html += `<optgroup label="Neural TTS (Kokoro)">`;
-      html += piper.map(v => `<option value="${esc(v.id)}" ${v.id === saved ? 'selected' : ''}>${esc(v.label)}</option>`).join('');
+      html += neural.map(v =>
+        `<option value="${esc(v.id)}" ${v.id === saved ? 'selected' : ''}>${esc(v.label)}</option>`
+      ).join('');
       html += `</optgroup>`;
     }
-    if (espeak.length) {
+    if (legacy.length) {
       html += `<optgroup label="espeak (Fallback)">`;
-      html += espeak.map(v => `<option value="${esc(v.id)}" ${v.id === saved ? 'selected' : ''}>${esc(v.label)}</option>`).join('');
+      html += legacy.map(v =>
+        `<option value="${esc(v.id)}" ${v.id === saved ? 'selected' : ''}>${esc(v.label)}</option>`
+      ).join('');
       html += `</optgroup>`;
     }
-    if (!html) html = `<option value="">No server TTS — install espeak-ng or Piper</option>`;
+    if (!html) {
+      html = `<option value="">No TTS engine — install espeak-ng or Kokoro</option>`;
+    }
     sel.innerHTML = html;
 
     if (!saved && sel.options.length) {
@@ -564,9 +751,9 @@ async function setServerVoice() {
   if (!id) return;
   localStorage.setItem('jellyfm-server-voice', id);
   await fetch(`${API}/tts/voice`, {
-    method: 'PUT',
+    method:  'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ voice_id: id }),
+    body:    JSON.stringify({ voice_id: id }),
   });
 }
 
@@ -584,29 +771,40 @@ async function previewVoice() {
     } else {
       toast('No TTS engine available on server', true);
     }
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function fmt(s) {
-  const m   = Math.floor(s / 60);
-  const sec = Math.floor(s % 60).toString().padStart(2, '0');
-  return `${m}:${sec}`;
+// ─────────────────────────────────────────────────────────────────────────────
+//  UTILITIES
+// ─────────────────────────────────────────────────────────────────────────────
+
+function fmt(totalSeconds) {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const m = Math.floor(s / 60);
+  const r = (s % 60).toString().padStart(2, '0');
+  return `${m}:${r}`;
 }
 
 function esc(s) {
-  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
-let toastTimer;
+let _toastTimer;
 function toast(msg, err = false) {
   const el = document.getElementById('toast');
   el.textContent = msg;
-  el.className = 'show' + (err ? ' err' : '');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.className = ''; }, 3500);
+  el.className   = 'show' + (err ? ' err' : '');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => { el.className = ''; }, 3500);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
 init();
 </script>
 </body>
