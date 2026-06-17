@@ -193,9 +193,10 @@
 </header>
 
 <!--
-  Single hidden audio element. It attaches to /{station_id}/stream exactly
-  once when the user presses Play. The server broadcast runs headlessly 24/7;
-  this element is purely a passive listener. It never drives track changes.
+  Single hidden audio element. Its src is set once to /stations/sessions/{id}
+  when the user first presses Play and NEVER changes again.  Switching stations
+  sends a PUT request that re-routes the server-side session to the new
+  broadcast — the audio element stays connected to the same persistent URL.
 -->
 <audio id="player" preload="none"></audio>
 
@@ -262,18 +263,21 @@
 
 <script>
 // ═══════════════════════════════════════════════════════════════════════════════
-//  JellyFM frontend — pure passive live-stream receiver
+//  JellyFM frontend — persistent session streaming receiver
 //
 //  Design contract:
 //    • The server runs a headless broadcast loop 24/7 per station.
-//    • The <audio> element attaches to /{id}/stream exactly once on Play.
-//      Every track transition and TTS announcement happens on the server.
-//      The browser never advances, retries, or resets tracks on its own.
-//    • Progress bar and track metadata are driven entirely by polling
-//      /{id}/now-playing every 2 seconds.  Between polls, requestAnimationFrame
-//      interpolates the elapsed position so the bar moves smoothly at 60 fps.
-//    • Skip sends POST /{id}/skip and nothing else — the server flushes the
-//      current decoder and all connected clients hear the change simultaneously.
+//    • On first Play, POST /stations/sessions creates a proxy session.
+//      audio.src is set to /stations/sessions/{id} exactly once and never
+//      changes again — even when the user switches stations.
+//    • Switching stations: PUT /stations/sessions/{id}/station re-routes the
+//      server-side session to the new broadcast mid-stream.  The audio element
+//      stays connected to the same URL — zero reconnection gap.
+//    • Progress bar and metadata driven by polling /{id}/now-playing every 2 s.
+//      Between polls, requestAnimationFrame interpolates elapsed position at
+//      60 fps using performance.now() delta.
+//    • Skip sends POST /{id}/skip — the server flushes the current decoder.
+//      All connected sessions hear the change simultaneously.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const API   = '';
@@ -281,14 +285,19 @@ const audio = document.getElementById('player');
 
 // ── UI / playback state ───────────────────────────────────────────────────────
 let selectedId = null;   // currently selected station ID
-let isPlaying  = false;  // whether this browser tab is connected to the stream
+let isPlaying  = false;  // whether this tab has an active stream session
+
+// ── Proxy session state ───────────────────────────────────────────────────────
+// sessionId is created once on first Play and reused for all channel switches.
+// It is cleared when the user explicitly presses Stop.
+let sessionId = null;
 
 // ── Poll state (drives progress bar interpolation) ────────────────────────────
 let pollInterval      = null;
-let lastTrackId       = null;   // last track ID seen from server
-let lastPollElapsed   = null;   // elapsed_seconds from the most recent poll response
-let lastPollTimestamp = null;   // performance.now() at the moment that poll arrived
-let lastDurationSec   = null;   // track.duration_ticks / 10_000_000 from last poll
+let lastTrackId       = null;
+let lastPollElapsed   = null;
+let lastPollTimestamp = null;
+let lastDurationSec   = null;
 
 // ── Stream error handling ─────────────────────────────────────────────────────
 let streamRetries = 0;
@@ -299,38 +308,29 @@ const MAX_STREAM_RETRIES = 3;
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function init() {
-  // Wire up the audio element error handler ONCE.
-  // This is the ONLY audio event we listen to.
-  // We never listen to 'ended' — the server handles all track transitions.
   audio.addEventListener('error', onStreamError);
-
-  // Start the 60 fps progress-bar interpolation loop immediately.
-  // It only draws when the station is live and poll data is available.
   requestAnimationFrame(progressFrame);
-
   await Promise.all([checkHealth(), loadGenres(), loadServerVoices()]);
   await loadStations();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  STREAM ERROR HANDLING
-//  A genuine network dropout should attempt to reconnect up to MAX_STREAM_RETRIES
-//  times with exponential backoff.  After that, the user must press Play again.
-//  We never advance the track queue from here — that is the server's job.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function onStreamError(e) {
-  if (!isPlaying || !selectedId) return;
+function onStreamError() {
+  if (!isPlaying || !sessionId) return;
   streamRetries++;
   if (streamRetries <= MAX_STREAM_RETRIES) {
-    const delay = streamRetries * 2000;   // 2 s, 4 s, 6 s
+    const delay = streamRetries * 2000;
     toast(`Stream interrupted — reconnecting in ${delay / 1000}s… (${streamRetries}/${MAX_STREAM_RETRIES})`, true);
     setTimeout(() => {
-      if (isPlaying && selectedId) attachStream(selectedId);
+      if (isPlaying && sessionId) reattachSession();
     }, delay);
   } else {
     toast('Stream unavailable after retries. Press Play to try again.', true);
-    isPlaying = false;
+    isPlaying  = false;
+    sessionId  = null;
     streamRetries = 0;
     stopPolling();
     redrawTransport();
@@ -425,13 +425,36 @@ async function createStation() {
 }
 
 async function selectStation(id) {
-  // Switching stations: disconnect the old stream but leave the server running.
-  if (selectedId && selectedId !== id && isPlaying) {
-    detachStream();
+  if (id === selectedId) return;
+
+  if (isPlaying && sessionId) {
+    // Session is live — switch channels server-side without touching audio.src.
+    // The server drains stale audio and seeds from the new broadcast instantly.
+    selectedId = id;
+    lastTrackId = null;
+    try {
+      const r = await fetch(`${API}/stations/sessions/${sessionId}/station`, {
+        method:  'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ station_id: id }),
+      });
+      if (!r.ok) {
+        // Session expired — fall back to a full reconnect
+        sessionId = null;
+        isPlaying = false;
+        await play();
+        return;
+      }
+      toast('Switched station');
+    } catch {
+      toast('Switch failed', true);
+    }
+  } else {
+    selectedId = id;
+    lastTrackId = null;
   }
-  selectedId = id;
-  lastTrackId = null;    // force a full track card re-render on next poll
-  await loadStations();  // refresh badge states
+
+  await loadStations();
   await renderNowPlayingPanel();
 }
 
@@ -448,25 +471,45 @@ async function deleteStation(id) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  STREAM ATTACH / DETACH
-//  attachStream sets src exactly once; the browser joins the live broadcast.
-//  detachStream removes the browser from the stream without touching the server.
+//  SESSION MANAGEMENT
+//  createProxySession: POST /stations/sessions → session_id
+//  attachSession:      set audio.src to the session stream URL (called once)
+//  reattachSession:    re-point audio.src to the same session URL on error
+//  detachStream:       pause and clear the audio element, close session
 // ─────────────────────────────────────────────────────────────────────────────
 
-function attachStream(id) {
+async function createProxySession(stationId) {
+  const r = await fetch(`${API}/stations/sessions`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ station_id: stationId }),
+  });
+  if (!r.ok) throw new Error('Could not create stream session');
+  const data = await r.json();
+  return data.session_id;
+}
+
+function attachSession(sid) {
   streamRetries = 0;
-  // Cache-buster prevents the browser from replaying a stale cached response.
-  audio.src = `${API}/stations/${id}/stream?_=${Date.now()}`;
+  // Cache-buster prevents browser from replaying a stale cached response.
+  audio.src = `${API}/stations/sessions/${sid}?_=${Date.now()}`;
   audio.load();
   audio.play().catch(() => toast('Tap the page first, then press Play.', true));
 }
 
+function reattachSession() {
+  if (!sessionId) return;
+  audio.pause();
+  attachSession(sessionId);
+}
+
 function detachStream() {
   audio.pause();
-  audio.src  = '';
+  audio.src = '';
   isPlaying  = false;
+  sessionId  = null;
+  streamRetries = 0;
   stopPolling();
-  // Reset interpolation state
   lastPollElapsed   = null;
   lastPollTimestamp = null;
   lastDurationSec   = null;
@@ -478,11 +521,19 @@ function detachStream() {
 
 async function play() {
   if (!selectedId) return;
-  attachStream(selectedId);
-  isPlaying = true;
-  startPolling();
-  await loadStations();
-  redrawTransport();
+  try {
+    // Create session only if we don't already have one
+    if (!sessionId) {
+      sessionId = await createProxySession(selectedId);
+    }
+    attachSession(sessionId);
+    isPlaying = true;
+    startPolling();
+    await loadStations();
+    redrawTransport();
+  } catch (e) {
+    toast(e.message || 'Could not start stream', true);
+  }
 }
 
 function stop() {
@@ -497,9 +548,6 @@ function togglePlay() {
 
 async function skip() {
   if (!selectedId || !isPlaying) return;
-  // POST to the server; the broadcast worker flushes the current decoder,
-  // advances exactly one track, and all connected clients hear the change.
-  // The frontend does nothing except show a toast.
   await fetch(`${API}/stations/${selectedId}/skip`, { method: 'POST' });
   toast('Skipping…');
 }
@@ -512,15 +560,11 @@ async function refill() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  NOW-PLAYING POLL
-//  Runs every 2 seconds while a stream is active.
-//  Only the track card innerHTML is rebuilt when the track ID changes.
-//  The progress bar is never touched here — it is driven by the rAF loop below.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function startPolling() {
   stopPolling();
   pollInterval = setInterval(pollNowPlaying, 2000);
-  // Immediate first poll
   pollNowPlaying();
 }
 
@@ -539,8 +583,6 @@ async function pollNowPlaying() {
     return;
   }
 
-  // Update interpolation anchors from the server's authoritative values.
-  // elapsed_seconds is how far into the current track the server is right now.
   if (np.elapsed_seconds != null) {
     lastPollElapsed   = np.elapsed_seconds;
     lastPollTimestamp = performance.now();
@@ -549,28 +591,22 @@ async function pollNowPlaying() {
     ? np.current.duration_ticks / 10_000_000
     : null;
 
-  // Rebuild the track card only when the playing track changes.
-  // This prevents the title/artist/duration from flashing on every poll.
   const incomingId = np.current?.id ?? null;
   if (incomingId !== lastTrackId) {
     lastTrackId = incomingId;
     renderTrackCard(np);
   }
 
-  // Sync the "Up next" text in case it changed without a track-ID change.
   const nextEl = document.getElementById('upNextEl');
   if (nextEl) {
-    nextEl.textContent = np.next
-      ? `Up next: ${np.next.name} by ${np.next.artist}`
+    nextEl.innerHTML = np.next
+      ? `Up next: <strong>${esc(np.next.name)}</strong> by ${esc(np.next.artist)}`
       : '';
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  60 FPS PROGRESS BAR INTERPOLATION
-//  This loop runs forever in the background.  It reads lastPollElapsed
-//  (anchored to lastPollTimestamp) and extrapolates forward using the wall clock
-//  so the bar moves smoothly at 60 fps without waiting for the next poll.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function progressFrame() {
@@ -581,9 +617,7 @@ function progressFrame() {
     const timeEl = document.getElementById('elapsedTime');
     const barEl  = document.getElementById('elapsedBar');
 
-    if (timeEl) {
-      timeEl.textContent = fmt(interpolated);
-    }
+    if (timeEl) timeEl.textContent = fmt(interpolated);
     if (barEl && lastDurationSec && lastDurationSec > 0) {
       const pct = Math.min(100, (interpolated / lastDurationSec) * 100);
       barEl.style.width = pct.toFixed(2) + '%';
@@ -594,12 +628,6 @@ function progressFrame() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  NOW-PLAYING PANEL RENDERING
-//  renderNowPlayingPanel: rebuilds the full right-hand panel shell.
-//    Called when: station is selected, or play/stop state changes.
-//  renderTrackCard: rebuilds only the inner track card.
-//    Called when: the track ID changes (detected by pollNowPlaying).
-//  redrawTransport: updates just the play/stop button label and skip enable state.
-//    Called when: isPlaying changes without a full panel rebuild.
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function renderNowPlayingPanel() {
@@ -616,7 +644,6 @@ async function renderNowPlayingPanel() {
     return;
   }
 
-  // Seed interpolation state from this initial fetch.
   if (np.elapsed_seconds != null) {
     lastPollElapsed   = np.elapsed_seconds;
     lastPollTimestamp = performance.now();
@@ -637,9 +664,7 @@ async function renderNowPlayingPanel() {
     </div>
 
     <div class="now-playing-card" id="trackCard">
-      <p class="empty" id="trackWaiting">
-        ${isPlaying ? 'Waiting for broadcast…' : 'Press Play to connect.'}
-      </p>
+      <p class="empty">${isPlaying ? 'Waiting for broadcast…' : 'Press Play to connect.'}</p>
     </div>
 
     <div class="volume-row">
@@ -658,7 +683,6 @@ async function renderNowPlayingPanel() {
     </div>
   `;
 
-  // If a track is already playing, fill the card immediately.
   if (np.current) {
     lastTrackId = np.current.id;
     renderTrackCard(np);
@@ -675,9 +699,6 @@ function renderTrackCard(np) {
     return;
   }
 
-  // Build the card HTML.  The elapsed/bar elements start at 0:00/0% and are
-  // immediately updated by the rAF loop — no flash because the rAF loop runs
-  // every frame and will correct them before the user can perceive 0:00.
   card.innerHTML = `
     <div class="track-title">${esc(t.name)}</div>
     <div class="track-artist">${esc(t.artist)}</div>
@@ -689,15 +710,15 @@ function renderTrackCard(np) {
       </div>
       <span id="durationTime">${t.duration_ticks ? fmt(t.duration_ticks / 10_000_000) : '--:--'}</span>
     </div>
-    <div id="upNextEl" class="track-next" style="font-size:0.8rem;color:var(--muted)">
+    <div id="upNextEl" class="track-next">
       ${np.next ? `Up next: <strong>${esc(np.next.name)}</strong> by ${esc(np.next.artist)}` : ''}
     </div>
   `;
 }
 
 function redrawTransport() {
-  const playBtn = document.getElementById('playBtn');
-  const skipBtn = document.getElementById('skipBtn');
+  const playBtn  = document.getElementById('playBtn');
+  const skipBtn  = document.getElementById('skipBtn');
   const liveChip = document.querySelector('.live-chip');
 
   if (playBtn) playBtn.textContent = isPlaying ? '⏹ Stop' : '▶ Play';

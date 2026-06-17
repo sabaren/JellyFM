@@ -29,6 +29,17 @@ pre-seeded from _recent_chunks (the last ~4 seconds of encoded audio),
 so their browser can sync and start playback immediately at the live
 position rather than waiting silently for the next chunk.
 
+Proxy sessions (seamless channel switching)
+────────────────────────────────────────────
+A _ProxySession wraps a subscriber queue with a stable ID.  The browser
+opens one persistent HTTP connection to /stations/sessions/{session_id}
+and never changes audio.src.  To switch channels the browser POSTs to
+/stations/sessions/{session_id}/station — the server atomically
+re-subscribes the session queue to the new station's broadcast, drains
+stale audio, and seeds the queue with the new station's burst buffer.
+The audio element hears a brief crossfade-quality splice rather than a
+reconnection gap.
+
 Metadata sync (drain wait)
 ──────────────────────────
 _pipe_url() returns as soon as the decoder has finished sending PCM to
@@ -59,6 +70,7 @@ import logging
 import time
 from collections import deque
 from typing import Optional, AsyncGenerator
+from uuid import uuid4
 
 from ..models.station import StationStatus
 from ..services.station_manager import station_manager
@@ -122,6 +134,21 @@ def _dec_wav_cmd() -> list[str]:
     ]
 
 
+# ── Per-client proxy session ──────────────────────────────────────────────────
+
+class _ProxySession:
+    """Wraps a subscriber queue with a stable ID for seamless channel switching.
+
+    The browser opens /stations/sessions/{id} once and keeps audio.src fixed.
+    Switching stations re-subscribes this queue to a different _Player without
+    ever closing the HTTP response.
+    """
+    def __init__(self, session_id: str, station_id: str):
+        self.id         = session_id
+        self.station_id = station_id
+        self.queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue(maxsize=_Q_MAX)
+
+
 # ── Per-station player state ──────────────────────────────────────────────────
 
 class _Player:
@@ -175,13 +202,22 @@ class _Player:
                 pass
         self.subscribers.clear()
 
+    def _seed_queue(self, q: asyncio.Queue) -> None:
+        """Pre-fill q with the burst buffer for immediate live-position sync."""
+        for chunk in list(self._recent_chunks):
+            try:
+                q.put_nowait(chunk)
+            except asyncio.QueueFull:
+                break
+
 
 # ── Service ───────────────────────────────────────────────────────────────────
 
 class PlaybackService:
 
     def __init__(self):
-        self._players: dict[str, _Player] = {}
+        self._players:  dict[str, _Player]       = {}
+        self._sessions: dict[str, _ProxySession] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -201,6 +237,12 @@ class PlaybackService:
     async def stop(self, station_id: str) -> None:
         """Stop the broadcast and tear down the encoder.
         Called only on station deletion or server shutdown."""
+        # Close every proxy session attached to this station first so their
+        # HTTP responses end cleanly before the player is torn down.
+        for sess_id in [s for s, sess in self._sessions.items()
+                        if sess.station_id == station_id]:
+            self._close_session_internal(sess_id)
+
         p = self._players.pop(station_id, None)
         if not p:
             return
@@ -237,7 +279,7 @@ class PlaybackService:
         return None
 
     async def subscribe(self, station_id: str) -> AsyncGenerator[bytes, None]:
-        """Attach a new HTTP client to the live broadcast stream.
+        """Attach a new HTTP client directly to the live broadcast stream.
 
         The subscriber queue is pre-seeded with the last ~4 seconds of encoded
         audio (burst-on-connect) so the browser can sync immediately to the
@@ -251,15 +293,7 @@ class PlaybackService:
             return
 
         q: asyncio.Queue = asyncio.Queue(maxsize=_Q_MAX)
-
-        # Burst-on-connect: pre-fill with recent chunks so the browser hears
-        # audio at the current live position the moment the HTTP response starts.
-        for chunk in list(p._recent_chunks):
-            try:
-                q.put_nowait(chunk)
-            except asyncio.QueueFull:
-                break
-
+        p._seed_queue(q)
         p.subscribers.append(q)
         try:
             while True:
@@ -279,6 +313,114 @@ class PlaybackService:
                 p.subscribers.remove(q)
             except ValueError:
                 pass
+
+    # ── Proxy session management ──────────────────────────────────────────────
+
+    def create_session(self, station_id: str) -> Optional[str]:
+        """Create a persistent proxy session pre-subscribed to *station_id*.
+
+        Returns a session ID that the browser embeds in its audio.src URL once.
+        The URL never changes — channel switching is handled server-side via
+        switch_session().
+        """
+        p = self._players.get(station_id)
+        if not p:
+            return None
+        sess_id = uuid4().hex[:16]
+        sess = _ProxySession(sess_id, station_id)
+        p._seed_queue(sess.queue)
+        p.subscribers.append(sess.queue)
+        self._sessions[sess_id] = sess
+        logger.debug("Session %s created for station %s", sess_id, station_id)
+        return sess_id
+
+    def switch_session(self, session_id: str, new_station_id: str) -> bool:
+        """Re-subscribe a proxy session to a different station without closing
+        the HTTP connection.  The old station's burst buffer is drained and the
+        new station's burst buffer is seeded atomically."""
+        sess = self._sessions.get(session_id)
+        if not sess:
+            return False
+        new_p = self._players.get(new_station_id)
+        if not new_p:
+            return False
+
+        # Unsubscribe from old station
+        old_p = self._players.get(sess.station_id)
+        if old_p:
+            try:
+                old_p.subscribers.remove(sess.queue)
+            except ValueError:
+                pass
+
+        # Drain stale audio so the new station starts cleanly
+        drained = 0
+        while not sess.queue.empty():
+            try:
+                sess.queue.get_nowait()
+                drained += 1
+            except asyncio.QueueEmpty:
+                break
+
+        # Seed with the new station's burst buffer
+        new_p._seed_queue(sess.queue)
+        sess.station_id = new_station_id
+        new_p.subscribers.append(sess.queue)
+
+        logger.debug(
+            "Session %s switched to station %s (drained %d stale chunks)",
+            session_id, new_station_id, drained,
+        )
+        return True
+
+    async def stream_session(self, session_id: str) -> AsyncGenerator[bytes, None]:
+        """Yield encoded MP3 chunks for an existing proxy session.
+
+        This generator runs for the lifetime of the HTTP connection.  The
+        session queue is populated by whatever station the session is currently
+        subscribed to; switch_session() atomically redirects it mid-stream.
+        """
+        sess = self._sessions.get(session_id)
+        if not sess:
+            return
+        try:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(sess.queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    if session_id not in self._sessions:
+                        break
+                    continue
+                if chunk is None:
+                    break
+                yield chunk
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._close_session_internal(session_id)
+
+    def _close_session_internal(self, session_id: str) -> None:
+        """Remove the session from the registry and unsubscribe its queue.
+        Sends a None sentinel so stream_session() exits if still running."""
+        sess = self._sessions.pop(session_id, None)
+        if not sess:
+            return
+        p = self._players.get(sess.station_id)
+        if p:
+            try:
+                p.subscribers.remove(sess.queue)
+            except ValueError:
+                pass
+        try:
+            sess.queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+        logger.debug("Session %s closed", session_id)
+
+    def session_station(self, session_id: str) -> Optional[str]:
+        """Return the station_id a proxy session is currently subscribed to."""
+        sess = self._sessions.get(session_id)
+        return sess.station_id if sess else None
 
     # ── Encoder lifecycle helpers ─────────────────────────────────────────────
 
