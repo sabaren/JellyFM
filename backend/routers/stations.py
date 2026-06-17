@@ -8,7 +8,16 @@ the live audio at whatever point the broadcast is currently at.
 
 Connecting or disconnecting a client never starts, stops, pauses, or resets
 the broadcast worker.  The worker only stops when the station is deleted.
+
+Proxy sessions (/sessions endpoints)
+──────────────────────────────────────
+A proxy session wraps a subscriber queue with a stable ID so the browser
+never needs to change audio.src.  The session is created once (POST /sessions),
+the audio element src is set to GET /sessions/{id} and never changed again.
+Switching channels is a single PUT /sessions/{id}/station call — the server
+atomically re-subscribes the session to the new broadcast mid-stream.
 """
+import logging
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
@@ -20,6 +29,8 @@ from ..services.station_manager import station_manager
 from ..services.playback import playback_service
 from ..services import tts_manager
 from ..services.banter import get_banter
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/stations", tags=["stations"])
 
@@ -98,11 +109,77 @@ async def stream_audio(station_id: str):
         headers={
             "Cache-Control":         "no-cache, no-store",
             "X-Content-Type-Options": "nosniff",
-            # Explicitly declare this as a live stream so browsers and proxies
-            # do not attempt to buffer or seek the entire response.
             "X-Accel-Buffering":     "no",
         },
     )
+
+
+# ── Proxy sessions (seamless channel switching) ───────────────────────────────
+
+class CreateSessionRequest(BaseModel):
+    station_id: str
+
+
+class SwitchSessionRequest(BaseModel):
+    station_id: str
+
+
+@router.post("/sessions", status_code=201)
+async def create_session(body: CreateSessionRequest):
+    """
+    Create a persistent proxy session pre-subscribed to a station.
+
+    The browser sets audio.src = /stations/sessions/{session_id} exactly once
+    and never changes it.  Channel switching is done via PUT
+    /stations/sessions/{session_id}/station so the HTTP connection stays open.
+    """
+    station = station_manager.get_station(body.station_id)
+    if not station:
+        raise HTTPException(status_code=404, detail="Station not found")
+    if not playback_service.is_running(body.station_id):
+        await playback_service.start(body.station_id)
+    session_id = playback_service.create_session(body.station_id)
+    if not session_id:
+        raise HTTPException(status_code=503, detail="Broadcast not running")
+    return {"session_id": session_id}
+
+
+@router.get("/sessions/{session_id}")
+async def stream_session(session_id: str):
+    """
+    Stream audio for an existing proxy session.
+
+    The response stays open indefinitely.  The server switches which station's
+    broadcast feeds this stream when the client calls PUT .../station.
+    """
+    if session_id not in playback_service._sessions:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    return StreamingResponse(
+        playback_service.stream_session(session_id),
+        media_type="audio/mpeg",
+        headers={
+            "Cache-Control":         "no-cache, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-Accel-Buffering":     "no",
+        },
+    )
+
+
+@router.put("/sessions/{session_id}/station", status_code=204)
+async def switch_session_station(session_id: str, body: SwitchSessionRequest):
+    """
+    Switch the station a proxy session is subscribed to without closing the
+    audio connection.  The server drains stale audio, seeds the new station's
+    burst buffer, and re-attaches the subscriber queue — all server-side.
+    """
+    station = station_manager.get_station(body.station_id)
+    if not station:
+        raise HTTPException(status_code=404, detail="Station not found")
+    if not playback_service.is_running(body.station_id):
+        await playback_service.start(body.station_id)
+    ok = playback_service.switch_session(session_id, body.station_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
 
 
 # ── Playback controls ─────────────────────────────────────────────────────────
