@@ -193,10 +193,11 @@
 </header>
 
 <!--
-  Single hidden audio element. Its src is set once to /stations/sessions/{id}
-  when the user first presses Play and NEVER changes again.  Switching stations
-  sends a PUT request that re-routes the server-side session to the new
-  broadcast — the audio element stays connected to the same persistent URL.
+  Single hidden audio element.  On Play or station switch, src is set to
+  /stations/{id}/stream?nocache={timestamp} — a unique URL each time so
+  Cloudflare and any reverse proxy treat it as a new, uncacheable request.
+  A full browser pipeline flush (pause → removeAttribute → load) is performed
+  before every new connection to guarantee the old stream socket is dropped.
 -->
 <audio id="player" preload="none"></audio>
 
@@ -285,12 +286,7 @@ const audio = document.getElementById('player');
 
 // ── UI / playback state ───────────────────────────────────────────────────────
 let selectedId = null;   // currently selected station ID
-let isPlaying  = false;  // whether this tab has an active stream session
-
-// ── Proxy session state ───────────────────────────────────────────────────────
-// sessionId is created once on first Play and reused for all channel switches.
-// It is cleared when the user explicitly presses Stop.
-let sessionId = null;
+let isPlaying  = false;  // whether this tab has an active stream connection
 
 // ── Poll state (drives progress bar interpolation) ────────────────────────────
 let pollInterval      = null;
@@ -319,18 +315,17 @@ async function init() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function onStreamError() {
-  if (!isPlaying || !sessionId) return;
+  if (!isPlaying || !selectedId) return;
   streamRetries++;
   if (streamRetries <= MAX_STREAM_RETRIES) {
     const delay = streamRetries * 2000;
     toast(`Stream interrupted — reconnecting in ${delay / 1000}s… (${streamRetries}/${MAX_STREAM_RETRIES})`, true);
     setTimeout(() => {
-      if (isPlaying && sessionId) reattachSession();
+      if (isPlaying && selectedId) attachStream(selectedId);
     }, delay);
   } else {
     toast('Stream unavailable after retries. Press Play to try again.', true);
-    isPlaying  = false;
-    sessionId  = null;
+    isPlaying     = false;
     streamRetries = 0;
     stopPolling();
     redrawTransport();
@@ -427,35 +422,27 @@ async function createStation() {
 async function selectStation(id) {
   if (id === selectedId) return;
 
-  if (isPlaying && sessionId) {
-    // Session is live — switch channels server-side without touching audio.src.
-    // The server drains stale audio and seeds from the new broadcast instantly.
-    selectedId = id;
-    lastTrackId = null;
-    try {
-      const r = await fetch(`${API}/stations/sessions/${sessionId}/station`, {
-        method:  'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ station_id: id }),
-      });
-      if (!r.ok) {
-        // Session expired — fall back to a full reconnect
-        sessionId = null;
-        isPlaying = false;
-        await play();
-        return;
-      }
-      toast('Switched station');
-    } catch {
-      toast('Switch failed', true);
-    }
-  } else {
-    selectedId = id;
-    lastTrackId = null;
+  const wasPlaying = isPlaying;
+  if (wasPlaying) {
+    // Fully tear down the existing connection before switching.
+    // Cloudflare and the browser both cache live streams aggressively;
+    // removeAttribute + load() is the only reliable way to guarantee the
+    // old socket is dropped and the browser's internal decode buffer is cleared.
+    flushAudioPipeline();
+    isPlaying = false;
+    stopPolling();
   }
+
+  selectedId  = id;
+  lastTrackId = null;
 
   await loadStations();
   await renderNowPlayingPanel();
+
+  if (wasPlaying) {
+    // Reconnect to the new station immediately using a fresh URL.
+    await play();
+  }
 }
 
 async function deleteStation(id) {
@@ -471,43 +458,43 @@ async function deleteStation(id) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  SESSION MANAGEMENT
-//  createProxySession: POST /stations/sessions → session_id
-//  attachSession:      set audio.src to the session stream URL (called once)
-//  reattachSession:    re-point audio.src to the same session URL on error
-//  detachStream:       pause and clear the audio element, close session
+//  STREAM ATTACH / DETACH
+//
+//  flushAudioPipeline: hard-reset the browser's media pipeline.
+//    pause() stops decoding.  removeAttribute('src') tells the browser there
+//    is no source — unlike src='' it also clears the internal resource URL so
+//    the next load() starts from scratch.  load() flushes the decode buffer and
+//    tears down the network socket synchronously.  All three steps are required;
+//    skipping any one leaves stale chunks in the pipeline.
+//
+//  attachStream: build a unique URL for the target station and connect.
+//    The ?nocache= query parameter makes every connection a cache miss for
+//    Cloudflare and any intermediate proxy — they cannot coalesce two requests
+//    with different query strings into the same cached response.
+//
+//  detachStream: full teardown + state reset on explicit Stop.
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function createProxySession(stationId) {
-  const r = await fetch(`${API}/stations/sessions`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ station_id: stationId }),
-  });
-  if (!r.ok) throw new Error('Could not create stream session');
-  const data = await r.json();
-  return data.session_id;
+function flushAudioPipeline() {
+  audio.pause();
+  audio.removeAttribute('src');
+  audio.load();
 }
 
-function attachSession(sid) {
+function attachStream(id) {
   streamRetries = 0;
-  // Cache-buster prevents browser from replaying a stale cached response.
-  audio.src = `${API}/stations/sessions/${sid}?_=${Date.now()}`;
+  // Unique timestamp suffix → Cloudflare treats every connection as a new,
+  // uncacheable request.  Without this a CDN PoP may continue serving the
+  // previous station's buffered chunks even after the backend switches.
+  flushAudioPipeline();
+  audio.src = `${API}/stations/${id}/stream?nocache=${Date.now()}`;
   audio.load();
   audio.play().catch(() => toast('Tap the page first, then press Play.', true));
 }
 
-function reattachSession() {
-  if (!sessionId) return;
-  audio.pause();
-  attachSession(sessionId);
-}
-
 function detachStream() {
-  audio.pause();
-  audio.src = '';
-  isPlaying  = false;
-  sessionId  = null;
+  flushAudioPipeline();
+  isPlaying     = false;
   streamRetries = 0;
   stopPolling();
   lastPollElapsed   = null;
@@ -521,19 +508,11 @@ function detachStream() {
 
 async function play() {
   if (!selectedId) return;
-  try {
-    // Create session only if we don't already have one
-    if (!sessionId) {
-      sessionId = await createProxySession(selectedId);
-    }
-    attachSession(sessionId);
-    isPlaying = true;
-    startPolling();
-    await loadStations();
-    redrawTransport();
-  } catch (e) {
-    toast(e.message || 'Could not start stream', true);
-  }
+  attachStream(selectedId);
+  isPlaying = true;
+  startPolling();
+  await loadStations();
+  redrawTransport();
 }
 
 function stop() {

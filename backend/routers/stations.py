@@ -107,9 +107,18 @@ async def stream_audio(station_id: str):
         playback_service.subscribe(station_id),
         media_type="audio/mpeg",
         headers={
-            "Cache-Control":         "no-cache, no-store",
+            # Instruct Cloudflare, nginx, and any other reverse proxy sitting
+            # in front of this server never to cache or buffer this response.
+            # "private" prevents shared/CDN caches; "must-revalidate" and
+            # Pragma/Expires cover HTTP/1.0 proxies.
+            "Cache-Control":         "no-cache, no-store, must-revalidate, private, max-age=0",
+            "Pragma":                "no-cache",
+            "Expires":               "0",
             "X-Content-Type-Options": "nosniff",
+            # Tell nginx not to buffer this as a file download.
             "X-Accel-Buffering":     "no",
+            # Keep the TCP connection alive for the duration of the stream.
+            "Connection":            "keep-alive",
         },
     )
 
@@ -158,9 +167,12 @@ async def stream_session(session_id: str):
         playback_service.stream_session(session_id),
         media_type="audio/mpeg",
         headers={
-            "Cache-Control":         "no-cache, no-store",
+            "Cache-Control":         "no-cache, no-store, must-revalidate, private, max-age=0",
+            "Pragma":                "no-cache",
+            "Expires":               "0",
             "X-Content-Type-Options": "nosniff",
             "X-Accel-Buffering":     "no",
+            "Connection":            "keep-alive",
         },
     )
 
