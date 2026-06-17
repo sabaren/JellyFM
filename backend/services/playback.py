@@ -103,12 +103,20 @@ _BACKOFF_MAX  = 30.0  # hard ceiling
 def _enc_cmd() -> list[str]:
     """Long-lived CBR MP3 encoder: raw PCM stdin → MP3 stdout.
 
+    -re            read input at native frame rate (1× real-time).  Without
+                   this flag ffmpeg encodes as fast as the CPU allows, blasting
+                   an entire track's worth of MP3 chunks into the subscriber
+                   queues in seconds.  -re creates natural backpressure so
+                   chunks trickle out second-by-second, keeping _recent_chunks
+                   a true ~4-second live window rather than a stale snapshot
+                   of audio that played minutes ago.
     -reservoir 0   disables the bit reservoir so every frame is exactly the
                    same size.  This makes mid-stream MP3 sync trivial for
                    browsers joining an in-progress broadcast.
     """
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-re",
         "-f", _PCM_FMT, "-ar", str(_RATE), "-ac", str(_CHANNELS), "-i", "pipe:0",
         "-c:a", "libmp3lame", "-b:a", _BITRATE,
         "-reservoir", "0",
@@ -117,18 +125,29 @@ def _enc_cmd() -> list[str]:
 
 
 def _dec_url_cmd(url: str) -> list[str]:
-    """Per-track decoder: Jellyfin URL → raw PCM stdout."""
+    """Per-track decoder: Jellyfin URL → raw PCM stdout.
+
+    -re paces the decoder to 1× real-time so the OS pipe fills at the same
+    rate the encoder consumes it.  This ensures _pipe_url() returns only after
+    the track's actual wall-clock duration, keeping the drain-wait accurate.
+    """
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-re",
         "-i", url,
         "-vn", "-f", _PCM_FMT, "-ar", str(_RATE), "-ac", str(_CHANNELS), "pipe:1",
     ]
 
 
 def _dec_wav_cmd() -> list[str]:
-    """Per-announcement decoder: WAV bytes stdin → raw PCM stdout."""
+    """Per-announcement decoder: WAV bytes stdin → raw PCM stdout.
+
+    -re paces TTS announcement playback to 1× real-time so the announcement
+    occupies the correct wall-clock duration in the broadcast timeline.
+    """
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-re",
         "-i", "pipe:0",
         "-vn", "-f", _PCM_FMT, "-ar", str(_RATE), "-ac", str(_CHANNELS), "pipe:1",
     ]
