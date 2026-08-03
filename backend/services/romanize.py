@@ -19,12 +19,22 @@ def _get_kakasi():
 
 
 def _has_cjk(text: str) -> bool:
+    """Check if text contains actual CJK characters (CJK Unified Ideographs, Hiragana, Katakana, Hangul).
+    
+    Narrowed ranges to exclude decorative symbols (0x2600-27BF), dingbats, 
+    and compatibility forms that aren't actual CJK script.
+    """
     for ch in text:
         cp = ord(ch)
         if (
-            0x3000 <= cp <= 0x9FFF    # CJK unified, hiragana, katakana
-            or 0xF900 <= cp <= 0xFAFF  # CJK compatibility
-            or 0x20000 <= cp <= 0x2A6DF
+            0x4E00 <= cp <= 0x9FFF     # CJK Unified Ideographs
+            or 0x3040 <= cp <= 0x309F   # Hiragana
+            or 0x30A0 <= cp <= 0x30FF   # Katakana
+            or 0x31F0 <= cp <= 0x31FF   # Katakana Phonetic Extensions
+            or 0xAC00 <= cp <= 0xD7AF   # Hangul Syllables
+            or 0xF900 <= cp <= 0xFAFF   # CJK Compatibility Ideographs
+            or 0x20000 <= cp <= 0x2A6DF  # CJK Extension A
+            or 0x2A700 <= cp <= 0x2B73F  # CJK Extension B
         ):
             return True
     return False

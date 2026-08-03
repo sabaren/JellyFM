@@ -127,13 +127,13 @@ def _enc_cmd() -> list[str]:
 def _dec_url_cmd(url: str) -> list[str]:
     """Per-track decoder: Jellyfin URL → raw PCM stdout.
 
-    -re paces the decoder to 1× real-time so the OS pipe fills at the same
-    rate the encoder consumes it.  This ensures _pipe_url() returns only after
-    the track's actual wall-clock duration, keeping the drain-wait accurate.
+    No -re flag: the encoder already has -re for real-time pacing. Adding -re
+    to the decoder is redundant and causes timing fragility on loaded systems
+    (CPU busy → decoder stalls → pipe fills → write errors). The network
+    stream itself is already real-time, so -re adds no value here.
     """
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-re",
         "-i", url,
         "-vn", "-f", _PCM_FMT, "-ar", str(_RATE), "-ac", str(_CHANNELS), "pipe:1",
     ]
@@ -142,12 +142,12 @@ def _dec_url_cmd(url: str) -> list[str]:
 def _dec_wav_cmd() -> list[str]:
     """Per-announcement decoder: WAV bytes stdin → raw PCM stdout.
 
-    -re paces TTS announcement playback to 1× real-time so the announcement
-    occupies the correct wall-clock duration in the broadcast timeline.
+    No -re flag: WAV announcements are small (<5s) and are fed all at once
+    via communicate(). The -re flag is irrelevant for in-memory input and
+    only adds unnecessary latency.
     """
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-re",
         "-i", "pipe:0",
         "-vn", "-f", _PCM_FMT, "-ar", str(_RATE), "-ac", str(_CHANNELS), "pipe:1",
     ]
@@ -294,7 +294,14 @@ class PlaybackService:
     def get_elapsed(self, station_id: str) -> Optional[float]:
         p = self._players.get(station_id)
         if p and p.track_started_at is not None:
-            return time.time() - p.track_started_at
+            station = station_manager.get_station(station_id)
+            elapsed = time.time() - p.track_started_at
+            # Clamp to track duration to prevent progress bar from wrapping
+            if station and station.current_track:
+                duration = station.current_track.duration_seconds
+                if duration:
+                    return min(elapsed, duration)
+            return elapsed
         return None
 
     async def subscribe(self, station_id: str) -> AsyncGenerator[bytes, None]:
@@ -602,9 +609,10 @@ class PlaybackService:
         prefetched_tts: Optional[bytes] = None
 
         while not p.stop_event.is_set():
+            # Initialize prefetch_job at loop start so crash handlers can cancel it
+            prefetch_job: Optional[asyncio.Task] = None
 
             # ── Step 1: ensure the encoder is alive ───────────────────────────
-            # If it has crashed, _ensure_encoder() backs off then restarts it.
             # The queue is NOT advanced on crash — same track replays.
             if not await self._ensure_encoder(p, sid):
                 break  # ffmpeg missing or stop requested during back-off
@@ -645,6 +653,9 @@ class PlaybackService:
                         sid, p.consecutive_errors,
                     )
                     p.skip_event.clear()
+                    # Cancel prefetch to prevent orphaned tasks accumulating
+                    if prefetch_job and not prefetch_job.done():
+                        prefetch_job.cancel()
                     continue
 
             p.skip_event.clear()
@@ -691,6 +702,9 @@ class PlaybackService:
                     sid, p.consecutive_errors,
                 )
                 p.skip_event.clear()
+                # Cancel prefetch to prevent orphaned tasks accumulating
+                if prefetch_job and not prefetch_job.done():
+                    prefetch_job.cancel()
                 continue
 
             # ── Step 7: metadata-sync drain wait ──────────────────────────────

@@ -35,13 +35,10 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # ── Startup ───────────────────────────────────────────────────────────────
 
-    # Fire TTS warm-up as a background task.  This triggers ONNX JIT
-    # compilation before any real announcement is requested.  Station
-    # broadcast loops start immediately in parallel — if a loop reaches its
-    # first TTS call before warm-up finishes, it waits on _synthesis_lock
-    # rather than cold-starting the model itself.
+    # Fire TTS warm-up as a background task (fire-and-forget).
     asyncio.create_task(tts_manager.warmup(), name="tts-warmup")
 
+    # Auto-start persisted stations
     persisted = station_manager.list_stations()
     if persisted:
         logger.info("Auto-starting %d persisted station broadcast(s)…", len(persisted))

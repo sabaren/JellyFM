@@ -61,7 +61,10 @@ class StationManager:
     # ------------------------------------------------------------------
 
     async def create_station(self, name: str, genre: str, shuffle: bool = True) -> Station:
-        tracks = await jellyfin.get_tracks_by_genre(genre)
+        # Prevent duplicate station names
+        if any(s.name.lower() == name.lower() for s in self._stations.values()):
+            raise ValueError(f"Station '{name}' already exists")
+        tracks = await jellyfin.get_tracks_by_genre(genre, limit=500)
         if shuffle:
             random.shuffle(tracks)
         station = Station(name=name, genre=genre, queue=tracks, shuffle=shuffle)
@@ -93,13 +96,18 @@ class StationManager:
         station = self._get_or_raise(station_id)
         return station.rewind()
 
-    async def refill_queue(self, station_id: str) -> Station:
+    async def refill_queue(self, station_id: str, append: bool = True) -> Station:
         station = self._get_or_raise(station_id)
-        tracks = await jellyfin.get_tracks_by_genre(station.genre)
+        tracks = await jellyfin.get_tracks_by_genre(station.genre, limit=500)
         if station.shuffle:
             random.shuffle(tracks)
-        station.queue = tracks
-        station.current_index = 0
+        if append and station.queue:
+            # Keep remaining tracks from current position, skip the one currently playing
+            remaining = station.queue[station.current_index + 1:]
+            station.queue = remaining + tracks
+        else:
+            station.queue = tracks
+            station.current_index = 0
         station.status = StationStatus.idle
         self._save()
         return station

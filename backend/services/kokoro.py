@@ -73,8 +73,10 @@ _instance     = None
 _init_lock    = threading.Lock()
 
 # Sequential synthesis lock — prevents concurrent CPU-bound inference jobs
-# from context-thrashing the Pi's cores and triggering timeouts.
-_synthesis_lock = asyncio.Lock()
+# from context-thrashing the Pi's cores. Must be threading.Lock (not
+# asyncio.Lock) because run_in_executor spawns real threads that bypass
+# asyncio.Lock protections entirely.
+_synthesis_lock = threading.Lock()
 
 
 # ── Initialisation ────────────────────────────────────────────────────────────
@@ -178,7 +180,7 @@ async def synthesize(text: str) -> Optional[bytes]:
     if not instance:
         return None
 
-    async with _synthesis_lock:
+    with _synthesis_lock:
         try:
             import soundfile as sf  # type: ignore
 
