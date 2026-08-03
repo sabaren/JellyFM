@@ -13,4 +13,4 @@ async def health():
 async def authenticate():
     """Manually trigger Jellyfin authentication (useful for testing credentials)."""
     await jellyfin.authenticate()
-    return {"status": "authenticated", "user_id": jellyfin._user_id}
+    return {"status": "authenticated"}
