@@ -1,44 +1,65 @@
 # JellyFM
-Self-hosted radio station powered by Jellyfin. Streams music by genre, announces tracks via TTS, and serves a web UI at `http://localhost:8000`.
+
+Self-hosted internet radio powered by your [Jellyfin](https://jellyfin.org) music library. Create stations by genre, stream continuous playback with AI-generated announcements via Kokoro neural TTS, and control everything through a clean web UI.
+
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)
+
+---
+
+## Features
+
+- **Genre-based stations** — Pick from your Jellyfin genres and start listening instantly
+- **Continuous broadcast** — Automatic track sequencing with TTS announcements between songs
+- **Smart queue management** — 500-track buffer with append-style refill (no random jumps on skip)
+- **Kokoro neural TTS** — Studio-quality offline voice synthesis with 13+ voices (American/British, male/female)
+- **Radio host personas** — Blended voice profiles (Smooth Host, Warm Evening, BBC Style, Chill Late-Night)
+- **Web UI** — Create stations, play/pause/skip, see now-playing info
+- **REST API** — Full programmatic control with Swagger docs at `/docs`
+
+---
+
+## Architecture
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│   Web UI     │────▶│  FastAPI     │────▶│  Jellyfin    │
+│  (Browser)   │◀────│  Backend     │◀────│  Server      │
+└──────────────┘     │              │     └──────────────┘
+                     │              │
+                     │  ┌──────────┐│     ┌────────────┐
+                     │  │ Kokoro   │◀────▶│ ONNX Runtime│
+                     │  │ TTS      │     └────────────┘
+                     │  └──────────┘
+                     │  ┌──────────┐
+                     │  │ playback │────▶ MP3 Stream
+                     │  │ service  │     (port 8000)
+                     │  └──────────┘
+                     └──────────────┘
+```
 
 ---
 
 ## Requirements
 
 - A running [Jellyfin](https://jellyfin.org) server with music in your library
-- Python 3.11+ **or** Docker
+- Python 3.11+ with virtual environment support
+- **[Kokoro ONNX](https://github.com/hexgrad/kokoro)** model files for TTS (see below)
 
 ---
 
-## Configuration
-
-Copy `.env.example` to `.env` and fill in your values:
-
-```env
-JELLYFIN_URL=http://your-jellyfin-host:8096
-JELLYFIN_USERNAME=your_username
-JELLYFIN_PASSWORD=your_password
-
-APP_HOST=0.0.0.0
-APP_PORT=8000
-LOG_LEVEL=info
-```
-
----
-
-## Local Deployment — Linux
+## Quick Start
 
 ### 1. Install system dependencies
 
-VLC and a TTS engine are required:
-
 ```bash
-# Debian / Ubuntu
+# Debian / Ubuntu / Nobara
 sudo apt update
-sudo apt install -y vlc libvlc-dev espeak python3-pip
+sudo apt install -y espeak python3-pip python3-venv
 
 # Fedora / RHEL
-sudo dnf install -y vlc vlc-devel espeak python3-pip
+sudo dnf install -y espeak python3-pip
 ```
 
 ### 2. Set up Python environment
@@ -51,62 +72,131 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Configure and run
+### 3. Download Kokoro TTS model
+
+```bash
+mkdir -p ~/kokoro
+# Download kokoro-v1.0.onnx and voices-v1.0.bin to ~/kokoro/
+# See https://github.com/hexgrad/kokoro for model download instructions
+```
+
+### 4. Configure
 
 ```bash
 cp .env.example .env
-# edit .env with your Jellyfin details
-python run.py
+# Edit .env with your Jellyfin details
 ```
 
-Open `http://localhost:8000` in your browser.
+**.env**
+```env
+JELLYFIN_URL=http://your-jellyfin-host:8096
+JELLYFIN_USERNAME=your_username
+JELLYFIN_PASSWORD=your_password
+
+APP_HOST=0.0.0.0
+APP_PORT=8000
+LOG_LEVEL=info
+```
+
+### 5. Run
+
+```bash
+uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
+
+Open **http://localhost:8000** in your browser. Interactive API docs at **http://localhost:8000/docs**.
 
 ---
 
-## Local Deployment — Windows
+## Project Structure
 
-### 1. Install prerequisites
-
-- [Python 3.11+](https://www.python.org/downloads/) — check **Add to PATH** during install
-- [VLC media player](https://www.videolan.org/vlc/) — install the **64-bit** version
-
-> **Important:** python-vlc looks for `libvlc.dll` on your PATH. After installing VLC, add its folder (usually `C:\Program Files\VideoLAN\VLC`) to your system PATH, or the app will fail to start.
-
-### 2. Set up Python environment
-
-Open **Command Prompt** or **PowerShell**:
-
-```powershell
-git clone https://github.com/sabaren/JellyFM.git
-cd JellyFM
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+```
+JellyFM/
+├── backend/
+│   ├── main.py              # FastAPI app, lifespan, CORS
+│   ├── models/
+│   │   ├── station.py       # Station Pydantic model
+│   │   └── jellyfin.py      # Track, Genre models
+│   ├── routers/
+│   │   ├── stations.py      # Station CRUD + playback controls
+│   │   ├── health.py        # Health check + auth status
+│   │   └── auth.py          # Jellyfin authentication
+│   └── services/
+│       ├── jellyfin.py      # Jellyfin API client
+│       ├── station_manager.py  # Station registry + queue management
+│       ├── playback.py      # Broadcast loop, MP3 streaming
+│       ├── tts_manager.py   # TTS coordinator (Kokoro > espeak)
+│       ├── kokoro.py        # Kokoro ONNX TTS service
+│       ├── espeak.py        # eSpeak fallback TTS
+│       └── romanize.py      # Text normalization for TTS
+├── requirements.txt
+├── .env.example
+└── README.md
 ```
 
-### 3. Configure and run
+---
 
-```powershell
-copy .env.example .env
-# open .env in Notepad and fill in your Jellyfin details
-python run.py
-```
+## API Reference
 
-Open `http://localhost:8000` in your browser.
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Web UI |
+| `GET` | `/health` | Server + Jellyfin auth status |
+| `POST` | `/auth` | Manually trigger Jellyfin auth |
+| `GET` | `/genres` | List all genres from Jellyfin |
+| `GET` | `/devices` | List audio output devices |
+| `GET` | `/stations` | List all stations |
+| `POST` | `/stations` | Create station `{name, genre, shuffle}` |
+| `GET` | `/stations/{id}` | Station details |
+| `DELETE` | `/stations/{id}` | Delete station + stop playback |
+| `GET` | `/stations/{id}/now-playing` | Current track, next track, stream URL |
+| `POST` | `/stations/{id}/play` | Start playback `{audio_device?}` |
+| `POST` | `/stations/{id}/pause` | Toggle pause |
+| `POST` | `/stations/{id}/skip` | Skip to next track |
+| `POST` | `/stations/{id}/stop` | Stop playback |
+| `POST` | `/stations/{id}/refill` | Re-fetch tracks from Jellyfin |
 
-> **TTS on Windows:** pyttsx3 uses the built-in SAPI5 voices. No extra install needed — Windows ships with at least one voice. You can add more via **Settings → Time & Language → Speech → Add voices**.
+Full interactive docs at `http://localhost:8000/docs`.
+
+---
+
+## TTS Voices
+
+### Base Voices (Kokoro)
+| ID | Name |
+|----|------|
+| `af_bella` | Bella (American Female) |
+| `af_nicole` | Nicole (American Female) |
+| `af_sarah` | Sarah (American Female) |
+| `af_sky` | Sky (American Female) |
+| `am_adam` | Adam (American Male) |
+| `am_michael` | Michael (American Male) |
+| `bf_emma` | Emma (British Female) |
+| `bf_isabella` | Isabella (British Female) |
+| `bm_george` | George (British Male) |
+| `bm_lewis` | Lewis (British Male) |
+
+### Radio Host Blends
+| ID | Name | Blend |
+|----|------|-------|
+| `blend_smooth_host` | Smooth Radio Host | Adam 60% + Michael 40% |
+| `blend_warm_host` | Warm Evening Host | Bella 70% + Sarah 30% |
+| `blend_bbc_host` | BBC Style Host | George 55% + Emma 45% |
+| `blend_chill_host` | Chill Late-Night Host | Sky 50% + Adam 30% + Nicole 20% |
+
+Fallback to **eSpeak** (6 voices) if Kokoro is unavailable.
 
 ---
 
 ## Docker
 
-### 1. Create a `Dockerfile`
+### Dockerfile
 
 ```dockerfile
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y \
-    vlc libvlc-dev espeak \
+    espeak \
     --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -114,12 +204,14 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+RUN mkdir -p /root/kokoro
+# COPY your kokoro-v1.0.onnx and voices-v1.0.bin to /root/kokoro/
 
 EXPOSE 8000
-CMD ["python", "run.py"]
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-### 2. Build and run
+### Build and run
 
 ```bash
 docker build -t jellyfm .
@@ -131,11 +223,7 @@ docker run -d \
   jellyfm
 ```
 
-Open `http://localhost:8000`.
-
-### 3. Docker Compose (optional)
-
-Create `docker-compose.yml` alongside your `.env`:
+### Docker Compose
 
 ```yaml
 services:
@@ -151,44 +239,29 @@ services:
 docker compose up -d
 ```
 
-> **Audio output in Docker:** containers don't have direct access to host audio hardware by default. For TTS and playback to actually produce sound on the host, you have two options:
->
-> **PulseAudio (Linux host):**
-> ```yaml
-> volumes:
->   - /run/user/1000/pulse:/run/user/1000/pulse
-> environment:
->   - PULSE_SERVER=unix:/run/user/1000/pulse/native
-> ```
->
-> **PipeWire (Linux host):**
-> ```yaml
-> volumes:
->   - /run/user/1000/pipewire-0:/run/user/1000/pipewire-0
-> ```
->
-> If you only need the API/UI and will handle audio routing separately, no extra config is needed.
+---
+
+## Recent Changes
+
+### v0.2.0 — Queue & Stability
+- **Fixed skip behavior:** `refill_queue()` now appends tracks instead of replacing the entire queue — no more random jumps
+- **Queue size:** Increased from 200 → 500 tracks for heavy skip buffer
+- **TTS warmup:** Moved to background thread — server starts in seconds
+- **Broadcast stability:** Improved playback loop resilience
 
 ---
 
-## API reference
+## Troubleshooting
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/` | Web UI |
-| `GET` | `/health` | Server + auth status |
-| `POST` | `/auth` | Manually trigger Jellyfin auth |
-| `GET` | `/genres` | List all genres from Jellyfin |
-| `GET` | `/devices` | List audio output devices |
-| `GET` | `/stations` | List all stations |
-| `POST` | `/stations` | Create a station `{name, genre, shuffle}` |
-| `GET` | `/stations/{id}` | Get station details |
-| `DELETE` | `/stations/{id}` | Delete station + stop playback |
-| `GET` | `/stations/{id}/now-playing` | Current track, next track, stream URL |
-| `POST` | `/stations/{id}/play` | Start playback `{audio_device?}` |
-| `POST` | `/stations/{id}/pause` | Toggle pause |
-| `POST` | `/stations/{id}/skip` | Skip to next track |
-| `POST` | `/stations/{id}/stop` | Stop playback |
-| `POST` | `/stations/{id}/refill` | Re-fetch tracks from Jellyfin |
+| Problem | Solution |
+|---------|----------|
+| `Kokoro TTS not available` | Ensure `~/kokoro/kokoro-v1.0.onnx` and `~/kokoro/voices-v1.0.bin` exist |
+| `Jellyfin auth failed` | Check `JELLYFIN_URL`, username, password in `.env` |
+| Server hangs on startup | This was fixed in v0.2.0 — warmup now runs on background thread |
+| Skip plays random songs | Fixed in v0.2.0 — queue refill now appends instead of replacing |
 
-Interactive docs available at `http://localhost:8000/docs`.
+---
+
+## License
+
+MIT © [Nicholaus Sabare](https://github.com/sabaren)
