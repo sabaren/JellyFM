@@ -24,12 +24,12 @@ Self-hosted internet radio powered by your [Jellyfin](https://jellyfin.org) musi
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Web UI     │────▶│  FastAPI     │────▶│  Jellyfin    │
-│  (Browser)   │◀────│  Backend     │◀────│  Server      │
+│   Web UI     │────▶│  FastAPI    │ ───▶│  Jellyfin    │
+│  (Browser)   │◀────│  Backend     |◀───│  Server      │
 └──────────────┘     │              │     └──────────────┘
                      │              │
-                     │  ┌──────────┐│     ┌────────────┐
-                     │  │ Kokoro   │◀────▶│ ONNX Runtime│
+                     │  ┌──────────┐│    ┌────────────┐
+                     │  │ Kokoro   │◀──▶│ONNX Runtime│
                      │  │ TTS      │     └────────────┘
                      │  └──────────┘
                      │  ┌──────────┐
